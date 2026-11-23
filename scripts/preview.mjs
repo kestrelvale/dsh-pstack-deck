@@ -156,6 +156,10 @@ const ctx = {
                 },
               }))
             }
+            if (req && req.method === 'update') {
+              // 演示「有新版本」长什么样：假装 npm 上多了一个 0.2.0
+              return Promise.resolve({ ok: true, value: { current: '0.1.0', latest: '0.2.0', hasUpdate: true, cached: false, error: '' } })
+            }
             if (req && req.method === 'board') return boardView().then((value) => ({ ok: true, value }))
             if (req && req.method === 'suggest') return suggest({ cwd: proj, roots: [] }).then((value) => ({ ok: true, value }))
             return Promise.resolve(payload)

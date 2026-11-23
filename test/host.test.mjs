@@ -274,3 +274,16 @@ test('建议工具：给 3~5 条，每条都带能直接发的提示词', async 
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('更新检查：路由走通，查不到时给的是错误不是「最新」', async () => {
+  const { ctx, out } = fakeCtx()
+  host.apply(ctx)
+  const route = out.routes.find((r) => r.path === '/api/psp')
+  const res = await post(route, { type: 'client-request', rpcId: 'u1', payload: { method: 'update', payload: { fresh: true } } })
+  const body = await res.json()
+  assert.equal(body.result.ok, true)
+  assert.equal(typeof body.result.value.current, 'string')
+  assert.match(body.result.value.current, /^\d+\.\d+\.\d+/)
+  // 真联网的那一次结果不确定，但形状必须稳：要么有 latest，要么有 error
+  assert.ok(body.result.value.latest || body.result.value.error)
+})

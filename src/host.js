@@ -26,8 +26,9 @@ import {
   saveCard,
   stateZh,
 } from './board.js'
-import { buildCatalog, toProviderItem, repoRoot, zhRoot, PROVIDER } from './catalog.js'
+import { buildCatalog, toProviderItem, repoRoot, zhRoot, PROVIDER, PKG_ROOT } from './catalog.js'
 import { suggest } from './suggest.js'
+import { checkUpdate } from './update.js'
 import { zhOf } from './i18n.js'
 
 export const name = 'dsh-pstack-deck'
@@ -81,6 +82,11 @@ async function skillBody(skillName) {
 
 // 返回形状就是 connection.rpc.call 的解包契约：{ok:true, value} 或 {ok:false, error}。
 const methods = {
+  async update(payload) {
+    const pkg = JSON.parse(await readFile(join(PKG_ROOT, 'package.json'), 'utf8'))
+    const r = await checkUpdate({ current: pkg.version, useCache: payload?.fresh !== true })
+    return { ok: true, value: r }
+  },
   async catalog(payload) {
     const cat = await catalog({ fresh: payload?.fresh === true })
     return {

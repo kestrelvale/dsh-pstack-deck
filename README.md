@@ -176,18 +176,54 @@ src/
 zh/            58 篇中文正文（与 repo/skills 逐篇对齐，npm run check:zh 校验）
 repo/          pstack 上游只读快照（skills / plugin.json / LICENSE）
 scripts/       sync-skills（推到 ~/.dsh/skills）、check-zh、preview（自渲染截图）
-test/          node --test，41 条
+test/          node --test，45 条
 docs/          parallel-tasks.md + 预览截图
 ```
 
 ## 开发
 
 ```bash
-npm test           # 41 条，覆盖目录解析、路由信封、工具、看板、依赖图、建议、客户端渲染
+npm test           # 45 条：目录解析、路由信封、工具、看板、依赖图、建议、版本比较、客户端渲染
+npm run dev        # 起一个临时宿主（默认 web profile:5599），改 src/ 自动重启
 npm run preview    # 用假 React 把面板渲染成 HTML，再用 Chrome 截图，不用起宿主
 npm run sync       # 把 repo/skills 推到 ~/.dsh/skills（--dry 只看差异）
 npm run check:zh   # 中文正文与原文逐篇对齐检查
 ```
+
+本地改代码用 `link:` 安装：
+
+```bash
+dsh plugin --profile desktop add link:/绝对路径/dsh-pstack-deck
+```
+
+### 热更新与热安装：哪些是热的
+
+这不是我保守，是宿主的能力边界。分三半看：
+
+| 你改了什么 | 要不要重启宿主 |
+|---|---|
+| `repo/skills/*.md`、`zh/*.md`、`.pstack/board/*.md` | **不要**。每次请求现读磁盘，面板点「刷新」/「重读」立刻生效 |
+| `src/client.js`（面板 UI） | **要**。客户端 bundle 在启动时按内容哈希构建一次（请求里的 `?rev=`），profile 里没有可覆盖的 bundle 缓存 |
+| `src/host.js` / `src/tools.js` | **要**。往 cordis 注册的技能 provider、HTTP 路由、工具都没有卸载重挂的入口 |
+| 升级到新版本 | 看宿主回报的 `activation`：`client-only` → 刷新页面；否则 → 重启 |
+
+所以「技能内容热更新」是这个项目的设计红利，「代码热更新」没有。`npm run dev` 把手动退出重开压成一次保存，仅此而已；唯一存在 HMR 通道的是 DSH 自己 checkout 里 `pnpm run dev:web` 起的那条，不覆盖 npm 装的第三方包。
+
+面板自己会查 npm：启一次（十分钟缓存）之后，标题栏显示 `插件 0.1.0` 或琥珀色的 `↑ 0.1.1`；有新版本时技能视图顶部给一条可复制的升级命令。
+
+### 发版
+
+```bash
+npm version patch                 # 或 minor / major
+npm test && npm run check:zh
+npm publish --registry=https://registry.npmjs.org --access public
+```
+
+三个坑，踩过：
+
+- 本机默认 registry 可能是国内镜像（`registry.npmmirror.com`），**镜像不能发**，必须显式带 `--registry`。
+- 账号开了 2FA 时，普通 token 发布报 `403 … two-factor authentication … required`；要么 `--otp=123456`，要么用勾了 **Bypass two-factor authentication** 的 Granular Access Token。
+- npm 对新包走 staged publishing：一发布先出现 `0.0.0-stage` 占位版，几秒后才落成真实版本，别看到占位版就以为失败了。
 
 ## 已知边界
 

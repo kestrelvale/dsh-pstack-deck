@@ -54,6 +54,8 @@ window.__ModuleLoader__.load({
       flow: false, // 看板：列表 or 流程图
       toast: '',
       toastAt: 0,
+      upd: null, // {current, latest, hasUpdate, error}；null = 还没问过 npm
+      updBusy: false,
     }
     const subs = new Set()
     const emit = () => subs.forEach((fn) => fn(store))
@@ -78,6 +80,18 @@ window.__ModuleLoader__.load({
         set({ catalog: cat, loading: false })
       } catch (e) {
         set({ loading: false, error: String((e && e.message) || e) })
+      }
+    }
+
+    // 问一次 npm 上有没有新版本。宿主那半缓存十分钟，所以开面板顺手查一下不心疼。
+    const checkUpd = async (fresh) => {
+      if (store.updBusy) return
+      set({ updBusy: true })
+      try {
+        const r = await rpc('update', fresh ? { fresh: true } : {})
+        set({ upd: r, updBusy: false })
+      } catch (e) {
+        set({ upd: { error: String((e && e.message) || e) }, updBusy: false })
       }
     }
 
@@ -696,6 +710,7 @@ window.__ModuleLoader__.load({
       useStore()
       const cat = store.catalog
       React.useEffect(() => { if (!cat && store.loading) load(false) }, [])
+      React.useEffect(() => { if (!store.upd) checkUpd(false) }, [])
       React.useEffect(() => {
         if (props && props.sessionId && props.sessionId !== store.sid) set({ sid: props.sessionId })
       }, [props && props.sessionId])
@@ -712,6 +727,19 @@ window.__ModuleLoader__.load({
         h('div', { key: 'sp', style: { flex: 1 } }),
         h('button', { key: 'vs', style: { ...s.chip(store.view === 'skills'), fontSize: 11 }, onClick: () => set({ view: 'skills' }) }, '技能'),
         h('button', { key: 'vb', style: { ...s.chip(store.view === 'board'), fontSize: 11 }, onClick: toBoard }, '看板'),
+        store.upd && !store.upd.error
+          ? h('span', {
+            key: 'pv',
+            title: store.upd.hasUpdate
+              ? `插件有新版本 ${store.upd.latest}（当前 ${store.upd.current}）`
+              : `插件 ${store.upd.current || ''} 是最新的`,
+            style: {
+              ...s.faint, fontFamily: C.mono, fontSize: 11, cursor: 'pointer',
+              color: store.upd.hasUpdate ? '#f0b132' : undefined,
+            },
+            onClick: () => checkUpd(true),
+          }, store.upd.hasUpdate ? `↑ ${store.upd.latest}` : `插件 ${store.upd.current || '?'}`)
+          : null,
         cat ? h('button', { key: 'r', style: { ...s.btn(), padding: '2px 6px', fontSize: 11 }, onClick: () => { load(true); if (store.board) loadBoard() }, title: '重新读一遍磁盘' }, '刷新') : null,
       ])
 
@@ -738,10 +766,19 @@ window.__ModuleLoader__.load({
         return h('div', { style: s.wrap }, [head, h('div', { key: 'b', style: { ...s.body, ...s.faint } }, '读目录…')])
       }
 
+      const updBar = store.upd && store.upd.hasUpdate
+        ? h('div', { key: 'upd', style: { margin: '8px 10px 0', padding: '6px 8px', border: '1px solid #6b5a20', borderRadius: 6, background: 'rgba(240,177,50,.08)', color: '#f0b132', fontSize: 11.5, lineHeight: 1.6 } }, [
+          h('div', { key: 't' }, `插件有新版本 ${store.upd.latest}（当前 ${store.upd.current}）。技能正文不受影响，但面板修的东西要升级才有。`),
+          h('div', { key: 'c', style: { fontFamily: C.mono, userSelect: 'all', marginTop: 4, color: '#d8d8d8' } }, 'dsh plugin --profile desktop add dsh-pstack-deck@' + store.upd.latest),
+          h('div', { key: 'n', style: { ...s.faint, marginTop: 4 } }, '装完重启宿主：Web 重启 dsh web，桌面版退出重开。'),
+        ])
+        : null
+
       const groups = GROUP_ORDER.filter((g) => (cat.groups[g] || []).length)
 
       return h('div', { style: s.wrap }, [
         head,
+        updBar,
         h('div', { key: 'find', style: { padding: '8px 10px 0', flex: 'none' } }, [
           h('input', {
             key: 'q',
