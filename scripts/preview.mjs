@@ -80,8 +80,11 @@ const payload = {
   },
 }
 
-// 看板要有个项目目录才画得出来：临时造一个，塞几张真卡
-const proj = await mkdtemp(join(tmpdir(), 'pstack-preview-'))
+const PKG_VERSION = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version
+
+// 看板要有个项目目录才画得出来：默认临时造一个塞演示卡；
+// PSP_PROJ=<目录> 时直接画真项目那块板（只读，别在预览里点会写盘的动作）
+const proj = process.env.PSP_PROJ ? process.env.PSP_PROJ : await mkdtemp(join(tmpdir(), 'pstack-preview-'))
 const seed = async () => {
   const map = await saveCard(proj, {
     kind: 'map',
@@ -98,7 +101,7 @@ const seed = async () => {
   const dropped = await saveCard(proj, { kind: 'idea', title: '顺手做个移动端', after: [idea.id] })
   await addProgress(proj, dropped.id, '这版不做', 'dropped')
 }
-await seed()
+if (!process.env.PSP_PROJ) await seed()
 const boardView = async () => {
   const b = await loadBoard(proj)
   const cards = b.cards.map((c) => ({
@@ -165,7 +168,7 @@ const ctx = {
             }
             if (req && req.method === 'update') {
               // 演示「有新版本」长什么样：假装 npm 上多了一个 0.2.0
-              return Promise.resolve({ ok: true, value: { current: '0.4.0', latest: '0.4.0', hasUpdate: false, cached: false, error: '' } })
+              return Promise.resolve({ ok: true, value: { current: PKG_VERSION, latest: PKG_VERSION, hasUpdate: false, cached: false, error: '' } })
             }
             if (req && req.method === 'board') {
               // init 模式：演示「项目还没初始化」那张卡长什么样
