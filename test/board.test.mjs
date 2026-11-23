@@ -2,7 +2,7 @@
 // 钉的是「文件是真的 markdown、状态真的落盘、下一步推荐是规则不是随缘」。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -165,6 +165,36 @@ test('下一步不会把地图当成活：全做完了就该说什么都没有',
     const board = await loadBoard(dir)
     assert.equal(mapOf(board.cards).id, map.id, '地图还在')
     assert.equal(nextOf(board.cards), null, '活全做完了就是没有下一步')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// 这一条对着真机上的现象：工具把卡写进了 ~/.dsh/pstack-board/unbound，
+// 人在面板里点开看板一片空白。宿主的工具 exec 里没有 cwd、没有 sessionId，
+// 工作目录在 exec.agent.session.header.cwd —— 走这条路才落在人自己的项目上。
+test('工具认项目：从 exec.agent.session.header.cwd 上溯，不再落到 unbound', async () => {
+  const { apply } = await import('../src/tools.js')
+  const regs = []
+  const ctx = {
+    tools: { register: (d) => regs.push(d) },
+    get: (n) => (n === 'sessions' ? undefined : undefined),
+    effect: (f) => f(),
+  }
+  apply(ctx)
+  const board = regs.find((r) => r.name === 'pstack_board')
+  const dir = await tmp()
+  try {
+    const sub = join(dir, 'src', 'api')
+    await mkdir(sub, { recursive: true })
+    await mkdir(join(dir, '.pstack'), { recursive: true })
+    const exec = { agent: { session: { header: { id: 's1', cwd: sub } } } }
+    const out = await board.execute({ op: 'add', title: '登录后偶发 401', kind: 'bug' }, exec)
+    assert.match(out, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '要落在项目根，不是子目录也不是 unbound')
+    assert.ok(!out.includes('unbound'), '绝不能落到兜底目录')
+    const files = await readdir(join(dir, '.pstack', 'board'))
+    assert.equal(files.length, 1)
+    assert.match(files[0], /登录后偶发-401/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

@@ -249,7 +249,7 @@ export function apply(ctx) {
  * 跟着 cwd 走会看见一块和根目录不相通的空板）。
  * 拿不到会话就退回进程 cwd —— 宁可落在错的地方让人看见，也不要静悄悄写到别处去。
  */
-export function workspaceOf(ctx, sessionId) {
+export function workspaceOf(ctx, sessionId, fallbackCwd) {
   try {
     const sessions = ctx.get('sessions')
     const session = sessionId && sessions && typeof sessions.get === 'function' ? sessions.get(sessionId) : null
@@ -258,7 +258,10 @@ export function workspaceOf(ctx, sessionId) {
   } catch {
     /* sessions 服务不在就往下退 */
   }
-  // 兜底也不能写进应用包里：那个目录是只读的，而且不是人的项目
+  // 工具调用拿得到 exec.cwd（宿主给的当前工作目录），面板调用拿不到 sessions 时才退回它。
+  // 少了这一步，工具会把卡写进一个叫 unbound 的假项目里——人点开看板发现是空的。
+  if (typeof fallbackCwd === 'string' && fallbackCwd) return projectRoot(fallbackCwd)
+  // 最后的兜底也不能写进应用包里：那个目录是只读的，而且不是人的项目
   return join(homedir(), '.dsh', 'pstack-board', 'unbound')
 }
 

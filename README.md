@@ -5,7 +5,7 @@
 ![npm](https://img.shields.io/npm/v/dsh-pstack-deck?style=flat-square&color=8A9A8C)
 ![技能](https://img.shields.io/badge/技能-58_个-D7B9C8?style=flat-square)
 ![中文正文](https://img.shields.io/badge/中文正文-58_篇-9AA8C4?style=flat-square)
-![测试](https://img.shields.io/badge/测试-60_通过-C9A97A?style=flat-square)
+![测试](https://img.shields.io/badge/测试-61_通过-C9A97A?style=flat-square)
 ![许可](https://img.shields.io/badge/许可-MIT-8A9A8C?style=flat-square)
 
 - 插件名：`dsh-pstack-deck`

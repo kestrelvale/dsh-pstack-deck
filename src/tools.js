@@ -152,11 +152,24 @@ async function install(args) {
 }
 
 /**
+ * 卡写进哪个项目。工具拿不到 exec.cwd——宿主的 exec 里只有 `agent`，
+ * 会话工作目录在 `exec.agent.session.header.cwd`（这是宿主自己的形状，不是我们编的）。
+ * 少了这一条，工具会把卡写进一个叫 unbound 的假项目，人点开面板只看到空板。
+ */
+function boardDir(args, exec, ctx) {
+  const explicit = String(args?.dir ?? '').trim()
+  if (explicit) return projectRoot(explicit)
+  const header = exec?.agent?.session?.header
+  const cwd = typeof header?.cwd === 'string' ? header.cwd : ''
+  return workspaceOf(ctx, header?.id ?? exec?.sessionId, cwd || process.cwd())
+}
+
+/**
  * 看板。agent 得知道自己在哪个项目里，所以 dir 优先：不给就退回这个会话的工作目录。
  */
 async function boardTool(args, exec, ctx) {
   const op = String(args?.op ?? 'list').trim()
-  const dir = String(args?.dir ?? '').trim() || workspaceOf(ctx, exec?.sessionId ?? exec?.session?.id)
+  const dir = boardDir(args, exec, ctx)
   if (op === 'add') {
     const title = String(args?.title ?? '').trim()
     if (!title) throw new Error('写一句这张卡要干什么')
@@ -255,7 +268,8 @@ async function boardTool(args, exec, ctx) {
   return lines.join('\n')
 }
 
-export function apply(ctx) {  const tools = ctx?.tools
+export function apply(ctx) {
+  const tools = ctx?.tools
   if (!tools || typeof tools.register !== 'function') {
     throw new Error('[pstack] tools 服务不在，工具行起不来')
   }
