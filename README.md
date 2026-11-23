@@ -150,8 +150,8 @@ pstack 每接一件事，走固定的四步。它的价值全在这个顺序里�
 **从 npm 装**
 
 ```bash
-dsh plugin --profile desktop add dsh-pstack-deck@0.2.1
-dsh plugin --profile web add dsh-pstack-deck@0.2.1
+dsh plugin --profile desktop add dsh-pstack-deck@0.2.2
+dsh plugin --profile web add dsh-pstack-deck@0.2.2
 ```
 
 **从 GitHub 装**
@@ -347,7 +347,7 @@ dsh plugin --profile desktop add link:/绝对路径/dsh-pstack-deck
 
 所以「技能内容热更新」是这个项目的设计红利，「代码热更新」没有。`npm run dev` 把手动退出重开压成一次保存，仅此而已；唯一存在 HMR 通道的是 DSH 自己 checkout 里 `pnpm run dev:web` 起的那条，不覆盖 npm 装的第三方包。
 
-面板自己会查 npm：启一次（十分钟缓存）之后，标题栏显示 `插件 0.2.1` 或琥珀色的 `↑ 0.3.0`；有新版本时技能视图顶部给一条可复制的升级命令。
+面板自己会查 npm：启一次（十分钟缓存）之后，标题栏显示 `插件 0.2.2` 或琥珀色的 `↑ 0.3.0`；有新版本时技能视图顶部给一条可复制的升级命令。
 
 ### 发版
 

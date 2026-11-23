@@ -825,10 +825,15 @@ window.__ModuleLoader__.load({
           }
         }
 
-        try {
+        // sidebarRightTabs 不在 apply 的 inject 里：它在 apply 跑完才就绪，直接 ctx.get()
+        // 拿到 undefined（表现为「面板装好了但没有入口」）。所以要么等它出现再注册，要么重试。
+        let tabDisposer = null
+        const registerTab = () => {
+          if (tabDisposer) return true
           const tabs = ctx.get('sidebarRightTabs')
-          if (tabs && typeof tabs.register === 'function') {
-            tabs.register({
+          if (!tabs || typeof tabs.register !== 'function') return false
+          try {
+            tabDisposer = tabs.register({
               id: TAB_ID,
               kind: TAB_ID,
               title: () => 'pstack',
@@ -838,12 +843,27 @@ window.__ModuleLoader__.load({
             })
             once('sidebar.right.pane.tab', () => slots.register({ name: 'sidebar.right.pane.tab', key: TAB_ID, inject: (sessionId) => ({ sessionId }) }, Panel))
             once('sidebar.right.pane.tab.title', () => slots.register({ name: 'sidebar.right.pane.tab.title', key: TAB_ID }, Title))
-          } else {
-            console.warn('[pstack] sidebarRightTabs 不在，右栏 tab 注册不了')
+            return true
+          } catch (e) {
+            console.warn('[pstack] 右栏 tab 注册失败：' + String((e && e.message) || e))
+            return false
           }
-        } catch (e) {
-          console.warn('[pstack] 右栏 tab 注册失败：' + String((e && e.message) || e))
         }
+
+        if (typeof ctx.inject === 'function') {
+          ctx.inject(['sidebarRightTabs'], () => { registerTab() })
+        } else {
+          let tries = 0
+          const timer = setInterval(() => {
+            if (registerTab() || ++tries >= 20) clearInterval(timer)
+          }, 200)
+          ctx.effect(() => () => clearInterval(timer))
+        }
+
+        ctx.effect(() => () => {
+          try { if (tabDisposer) tabDisposer() } catch { /* 卸载失败无所谓 */ }
+          tabDisposer = null
+        })
 
         once('conversation.input.dock', () => slots.register({ name: 'conversation.input.dock', id: 'dsh-pstack-deck', order: 50 }, Dock))
       },

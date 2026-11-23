@@ -43,7 +43,7 @@ function clickByText(node, label) {
   return clickByText(kids, label)
 }
 
-function boot(rpcImpl) {
+function boot(rpcImpl, { ready = true } = {}) {
   let loaded = null
   const win = {
     __ModuleLoader__: {
@@ -56,7 +56,12 @@ function boot(rpcImpl) {
   new Function('window', code)(win)
   assert.equal(loaded.id, 'dsh-pstack-deck', 'loader id 必须和 package 的 client 对得上')
 
-  const got = { tabs: [], slots: [], injected: [] }
+  const got = { tabs: [], slots: [], injected: [], effects: [] }
+  // 真宿主里 sidebarRightTabs 在 apply 跑完之后才就绪——所以这里也先不给，
+  // 由 readyTabs() 模拟「服务出现」。之前一次性 ctx.get() 拿到 undefined 就
+  // 永久放弃注册，面板装好了却没有任何入口。
+  let tabsReady = false
+  const pending = []
   const ctx = {
     get(name) {
       if (name === 'slots') {
@@ -65,14 +70,24 @@ function boot(rpcImpl) {
           inject(name, fn) { got.injected.push(name); return fn() },
         }
       }
-      if (name === 'sidebarRightTabs') return { register(def) { got.tabs.push(def); return () => {} } }
+      if (name === 'sidebarRightTabs') {
+        return tabsReady ? { register(def) { got.tabs.push(def); return () => {} } } : undefined
+      }
       if (name === 'connection') {
         return { rpc: { call: (_ch, _ep, call) => Promise.resolve(rpcImpl(call.method, call.payload)) } }
       }
       return undefined
     },
+    inject(names, cb) { pending.push({ names, cb }) },
+    effect(fn) { got.effects.push(fn()) },
   }
   loaded.exports.apply(ctx)
+  got.readyTabs = () => {
+    tabsReady = true
+    pending.splice(0).forEach((p) => p.cb())
+  }
+  got.pendingInject = pending
+  if (ready) got.readyTabs()
   return { loaded, got }
 }
 
@@ -100,7 +115,11 @@ test('面板半：方言正确——零 import，只 require react', () => {
 })
 
 test('面板半：apply 之后右栏有 tab + 标题 + tab 本体 + 输入框 dock', () => {
-  const { got } = boot(() => catalogOk)
+  const { got } = boot(() => catalogOk, { ready: false })
+  // 服务还没就绪时不能抢跑：拿到 undefined 就注册，是「面板装了但没有入口」的成因
+  assert.equal(got.tabs.length, 0)
+  assert.deepEqual(got.pendingInject.map((p) => p.names), [['sidebarRightTabs']])
+  got.readyTabs()
   assert.equal(got.tabs.length, 1)
   assert.equal(got.tabs[0].id, 'psp-skills')
   assert.equal(got.tabs[0].priority, 'builtin')
