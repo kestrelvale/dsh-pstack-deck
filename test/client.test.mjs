@@ -1,0 +1,291 @@
+// 面板半的离线冒烟：不打开浏览器，用最小的 React 假件把 client.js 跑一遍。
+// 抓的是方言错（import 了东西、apply 没注册、组件一渲染就抛）——这些错在真机上
+// 只表现为「右栏没有这个 tab」，原因要去浏览器控制台才看得到。
+//
+// 假 React 的 useEffect 是立即执行的：这样面板「挂载 → 请求目录 → 渲染列表」这条
+// 真路径能在 node 里跑完，而不是只渲染出「读目录…」就收工。
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+
+const code = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
+
+const React = {
+  createElement(type, props, ...kids) {
+    return { type, props: props || {}, children: kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false && k !== true) }
+  },
+  useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+  useEffect: (fn) => { fn() },
+  useRef: (init) => ({ current: init }),
+  Fragment: 'Fragment',
+}
+
+const textOf = (node) => {
+  if (node === null || node === undefined) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(textOf).join(' ')
+  // 真 React 会去调函数组件；这里跟着调，否则 List/Guide 的子树看不见
+  if (typeof node.type === 'function') return textOf(node.type(node.props))
+  if (node.children) return textOf(node.children)
+  return ''
+}
+
+// 找一个按钮文字是 label 的元素并点它（面板里所有交互都挂在 onClick 上）
+function clickByText(node, label) {
+  if (!node || typeof node !== 'object') return false
+  if (Array.isArray(node)) return node.some((n) => clickByText(n, label))
+  if (typeof node.type === 'function') return clickByText(node.type(node.props), label)
+  const kids = node.children || []
+  if (node.props && typeof node.props.onClick === 'function' && (kids.includes(label) || textOf(node).includes(label))) {
+    node.props.onClick()
+    return true
+  }
+  return clickByText(kids, label)
+}
+
+function boot(rpcImpl) {
+  let loaded = null
+  const win = {
+    __ModuleLoader__: {
+      load({ id, factory }) {
+        loaded = { id, exports: factory((n) => (n === 'react' ? React : (() => { throw new Error('没有这个模块：' + n) })())) }
+      },
+    },
+  }
+  // eslint-disable-next-line no-new-func
+  new Function('window', code)(win)
+  assert.equal(loaded.id, 'dsh-pstack-deck', 'loader id 必须和 package 的 client 对得上')
+
+  const got = { tabs: [], slots: [], injected: [] }
+  const ctx = {
+    get(name) {
+      if (name === 'slots') {
+        return {
+          register(def, Comp) { got.slots.push({ name: def.name, key: def.key, id: def.id, Comp, inject: def.inject }); return () => {} },
+          inject(name, fn) { got.injected.push(name); return fn() },
+        }
+      }
+      if (name === 'sidebarRightTabs') return { register(def) { got.tabs.push(def); return () => {} } }
+      if (name === 'connection') {
+        return { rpc: { call: (_ch, _ep, call) => Promise.resolve(rpcImpl(call.method, call.payload)) } }
+      }
+      return undefined
+    },
+  }
+  loaded.exports.apply(ctx)
+  return { loaded, got }
+}
+
+const catalogOk = {
+  ok: true,
+  value: {
+    version: '0.15.46',
+    groups: { workflow: ['tdd'], core: ['principle-laziness-protocol'] },
+    skills: [
+      { name: 'tdd', zh: '先写一个会失败的测试', description: 'x', deps: [], argumentHint: '', modelInvocable: false, principle: null },
+      { name: 'principle-laziness-protocol', zh: '能删就删，改得越少越好', deps: [], principle: { group: 'core', rule: 'Bias toward deletion.' } },
+    ],
+    missingDeps: {},
+    drift: { missing: [], changed: [] },
+    driftOk: true,
+  },
+}
+
+const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms))
+
+test('面板半：方言正确——零 import，只 require react', () => {
+  assert.doesNotMatch(code, /^\s*import\s/m, '客户端产物里不能有 import（没有打包器）')
+  const reqs = [...code.matchAll(/require\('([^']+)'\)/g)].map((m) => m[1])
+  assert.deepEqual([...new Set(reqs)], ['react'])
+})
+
+test('面板半：apply 之后右栏有 tab + 标题 + tab 本体 + 输入框 dock', () => {
+  const { got } = boot(() => catalogOk)
+  assert.equal(got.tabs.length, 1)
+  assert.equal(got.tabs[0].id, 'psp-skills')
+  assert.equal(got.tabs[0].priority, 'builtin')
+  assert.equal(got.tabs[0].title(), 'pstack')
+  assert.deepEqual(got.tabs[0].guide.map((g) => g.order), [70])
+
+  assert.deepEqual(got.slots.map((s) => s.name).sort(), ['conversation.input.dock', 'sidebar.right.pane.tab', 'sidebar.right.pane.tab.title'])
+  const pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab')
+  assert.equal(pane.key, 'psp-skills')
+  assert.deepEqual(pane.inject('sess-1'), { sessionId: 'sess-1' })
+})
+
+test('面板半：挂载 → 取目录 → 渲染引导与分组', async () => {
+  const { got } = boot(() => catalogOk)
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  assert.match(textOf(Pane({ sessionId: 's1' })), /读目录/, '第一帧是加载态')
+  await tick()
+  const text = textOf(Pane({ sessionId: 's1' }))
+  assert.match(text, /v0\.15\.46/)
+  assert.match(text, /先写一个会失败的测试/)
+  assert.match(text, /能删就删/)
+  assert.match(text, /不知道点哪个/)
+  assert.match(text, /工作流 · 1/)
+  assert.match(text, /核心准则 · 1/)
+})
+
+test('面板半：读不到目录时给人能照着做的一句话', async () => {
+  const { got } = boot(() => ({ ok: false, error: { message: '宿主没响应' } }))
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  Pane({ sessionId: 's2' })
+  await tick()
+  const text = textOf(Pane({ sessionId: 's2' }))
+  assert.match(text, /读不到 pstack 目录/)
+  assert.match(text, /宿主没响应/)
+})
+
+test('面板半：副本和仓库不一致时会催同步', async () => {
+  const drift = { ...catalogOk.value, driftOk: false, drift: { missing: ['tdd'], changed: ['architect'] } }
+  const { got } = boot(() => ({ ok: true, value: drift }))
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  Pane({ sessionId: 's3' })
+  await tick()
+  const text = textOf(Pane({ sessionId: 's3' }))
+  assert.match(text, /和仓库不一致/)
+  assert.match(text, /npm run sync/)
+})
+
+test('面板半：看板视图列出卡和下一步，按钮点得动', async () => {
+  const board = {
+    ok: true,
+    value: {
+      cwd: '/proj',
+      dir: '/proj/.pstack/board',
+      next: { card: { id: 2, title: '登录偶发 401' }, skill: 'correct', why: '把它变成一条规则' },
+      cards: [
+        { id: 1, kind: 'idea', state: 'idea', title: '把导出改成流式', body: '', progress: 0, next: { skill: 'figure-it-out', why: '先设计路线' } },
+        { id: 2, kind: 'bug', state: 'doing', title: '登录偶发 401', body: 'Safari 复现', progress: 1, next: { skill: 'correct', why: '变成规则' } },
+      ],
+    },
+  }
+  const sug = {
+    ok: true,
+    value: {
+      layer: 'project',
+      items: [
+        { id: '#2', cardId: 2, project: '', title: '登录偶发 401', skill: 'correct', why: '把它变成一条规则', urgency: 0.9, certainty: 0.9, factors: { state: 1, kind: 1, progress: 0.33, fresh: 1 }, prompt: '/correct #2 登录偶发 401' },
+        { id: '#1', cardId: 1, project: '', title: '把导出改成流式', skill: 'figure-it-out', why: '先设计路线', urgency: 0.29, certainty: 0.9, factors: { state: 0.3, kind: 0, progress: 0, fresh: 1 }, prompt: '/figure-it-out #1 把导出改成流式' },
+      ],
+    },
+  }
+  const seen = []
+  const { got } = boot((method) => {
+    seen.push(method)
+    if (method === 'suggest') return sug
+    return method === 'board' ? board : catalogOk
+  })
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  Pane({ sessionId: 's9' })
+  await tick()
+  assert.equal(clickByText(Pane({ sessionId: 's9' }), '看板'), true, '得有个看板入口')
+  await tick()
+  const text = textOf(Pane({ sessionId: 's9' }))
+  assert.equal(seen.includes('board'), true, '切到看板要去宿主取一次')
+  assert.match(text, /建议接下来做这几件 · 按这个项目推/)
+  assert.match(text, /登录偶发 401/)
+  assert.match(text, /correct/)
+  // 建议默认收起（只看标题和分数），点开才露出能直接粘的命令
+  assert.equal(clickByText(Pane({ sessionId: 's9' }), '把导出改成流式'), true, '建议标题要能点开')
+  const detail = textOf(Pane({ sessionId: 's9' }))
+  assert.match(detail, /\/figure-it-out #1 把导出改成流式/, '展开后要有带卡号的提示词')
+  assert.match(detail, /Jev 分解/)
+  assert.match(detail, /执行这条命令/)
+  assert.match(text, /把导出改成流式/)
+  assert.match(text, /正在做|在做/)
+})
+
+test('看板：流程图视图画出节点与箭头，废弃的单独标出', async () => {
+  const board = {
+    ok: true,
+    value: {
+      cwd: '/proj',
+      dir: '/proj/.pstack/board',
+      next: null,
+      cards: [
+        { id: 1, kind: 'task', state: 'doing', title: '先把 session 换掉', body: '', progress: 0, after: [], next: { skill: 'tdd', why: '先写个会失败的测试' } },
+        { id: 2, kind: 'task', state: 'todo', title: '再加刷新', body: '', progress: 0, after: [1], blocked: [1], next: null },
+        { id: 3, kind: 'idea', state: 'dropped', title: '顺手做移动端', body: '', progress: 0, after: [1], next: null },
+      ],
+      graph: {
+        nodes: [
+          { id: 1, title: '先把 session 换掉', kind: 'task', state: 'doing', depth: 0 },
+          { id: 2, title: '再加刷新', kind: 'task', state: 'todo', depth: 1 },
+          { id: 3, title: '顺手做移动端', kind: 'idea', state: 'dropped', depth: 1 },
+        ],
+        edges: [{ from: 1, to: 2 }, { from: 1, to: 3 }],
+        lines: [[1, 2]],
+        depthMax: 1,
+      },
+    },
+  }
+  const { got } = boot((method) => (method === 'board' ? board : method === 'suggest' ? { ok: false } : catalogOk))
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  Pane({ sessionId: 's10' })
+  await tick()
+  clickByText(Pane({ sessionId: 's10' }), '看板')
+  await tick()
+  assert.equal(clickByText(Pane({ sessionId: 's10' }), '流程'), true, '得能切到流程图')
+  await tick()
+  const text = textOf(Pane({ sessionId: 's10' }))
+  assert.match(text, /先把 session 换掉/)
+  assert.match(text, /再加刷新/)
+  assert.match(text, /顺手做移动端/)
+  assert.match(text, /废弃/)
+  assert.match(text, /列表/, '切过去之后按钮该变成返回列表')
+
+  // 预期线路：没做完的卡后面跟着虚线小格「推荐的技能」和「完成」
+  assert.match(text, /→ \/tdd/, '流程图要画出下一步推荐什么')
+  assert.match(text, /✓ 完成 #1/, '预期线路要落到「完成」')
+
+  // 点节点 → 下钻：给命令、给完结入口
+  assert.equal(clickByText(Pane({ sessionId: 's10' }), '先把 session 换掉'), true, '节点要能点开')
+  const drill = textOf(Pane({ sessionId: 's10' }))
+  assert.match(drill, /标记完成/, '下钻里要有完结入口')
+  assert.match(drill, /交回/, '在做中的卡给的是交回，不是抢回来')
+  assert.match(drill, /\/tdd #1 先把 session 换掉/, '下钻要给出带卡号的命令')
+})
+
+test('看板：地图、冲突横幅、可开工与认领按钮都在', async () => {
+  const board = {
+    ok: true,
+    value: {
+      cwd: '/proj',
+      dir: '/proj/.pstack/board',
+      next: null,
+      frontier: [1, 3],
+      map: {
+        id: 9,
+        title: '把导出改成流式',
+        children: 2,
+        sections: { destination: '大文件导出不 OOM', decisions: '用 node 的 stream', fog: '断点续传要不要做', out: '' },
+      },
+      conflicts: { pairs: [{ a: 1, b: 2, paths: ['src/api'] }], unscoped: [] },
+      graph: { nodes: [], edges: [], lines: [], depthMax: 0 },
+      cards: [
+        { id: 9, kind: 'map', state: 'todo', title: '把导出改成流式', body: '', progress: 0, after: [] },
+        { id: 1, kind: 'task', state: 'doing', title: '改接口返回', body: '', progress: 0, after: [], owner: 'sess-a', blocked: [] },
+        { id: 2, kind: 'task', state: 'doing', title: '补接口测试', body: '', progress: 0, after: [], owner: 'sess-b', blocked: [] },
+        { id: 3, kind: 'task', state: 'todo', title: '换掉读取方式', body: '', progress: 0, after: [], blocked: [] },
+        { id: 4, kind: 'task', state: 'todo', title: '再改调用方', body: '', progress: 0, after: [1], blocked: [1] },
+      ],
+    },
+  }
+  const { got } = boot((method) => (method === 'board' ? board : method === 'suggest' ? { ok: false } : catalogOk))
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  Pane({ sessionId: 's11' })
+  await tick()
+  clickByText(Pane({ sessionId: 's11' }), '看板')
+  await tick()
+  const text = textOf(Pane({ sessionId: 's11' }))
+  assert.match(text, /把导出改成流式/)
+  assert.match(text, /大文件导出不 OOM/)
+  assert.match(text, /断点续传要不要做/)
+  assert.match(text, /并行冲突/)
+  assert.match(text, /可开工/)
+  assert.match(text, /被挡着/)
+  assert.match(text, /我来做/)
+  assert.match(text, /交回/)
+})

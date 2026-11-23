@@ -1,0 +1,14 @@
+# dsh-pstack-deck bundle 层：把 pstack 面板挂进 web profile。
+#
+# 两行是有原因的，不是抄来的：
+# - 宿主行注册 skill provider 与 /api/psp 路由（inject 里要 skills + connection）；
+# - 工具行单独一行，因为工具注册要求 inject 里有 tools，跟宿主行的依赖不是一套。
+#
+# 由 dsh plugin add 自动装配，不要手改 profile 里的 cordis 配置。
+- insert:
+    - id: dsh-pstack-deck
+      name: 'dsh-pstack-deck'
+      config: {}
+    - id: dsh-pstack-deck-tools
+      name: 'dsh-pstack-deck/tools'
+      config: {}

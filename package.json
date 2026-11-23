@@ -1,0 +1,60 @@
+{
+  "name": "dsh-pstack-deck",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "pstack 的 DSH 面板：58 个技能点一下就用，带项目看板、依赖拓扑与三层决策推荐。",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/host.js",
+    "./tools": "./src/tools.js",
+    "./client": "./src/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "sync": "node scripts/sync-skills.mjs",
+    "check:zh": "node scripts/check-zh.mjs",
+    "preview": "node scripts/preview.mjs /tmp/psp-preview.html"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kestrelvale/dsh-pstack-deck.git"
+  },
+  "homepage": "https://github.com/kestrelvale/dsh-pstack-deck#readme",
+  "bugs": {
+    "url": "https://github.com/kestrelvale/dsh-pstack-deck/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "pstack",
+    "skills",
+    "agent-skills",
+    "board",
+    "kanban"
+  ],
+  "files": [
+    "src/",
+    "scripts/",
+    "zh/",
+    "repo/skills/",
+    "repo/plugin.json",
+    "repo/README.md",
+    "repo/LICENSE",
+    "repo/UPSTREAM.md",
+    "cordis.patch.yml",
+    "docs/",
+    "README.md"
+  ]
+}
