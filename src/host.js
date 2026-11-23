@@ -122,21 +122,21 @@ const methods = {
   // ---------------------------------------------------------------- 看板
 
   async board(payload, ctx) {
-    const ws = resolveWorkspace(ctx, payload?.sessionId)
+    const ws = resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)
     const board = await loadBoard(ws.root)
     return { ok: true, value: await view(board, ws) }
   },
 
   /** 初始化：把一个陌生项目变成「有板可看」。重复点是安全的。 */
   async init(payload, ctx) {
-    const ws = resolveWorkspace(ctx, payload?.sessionId)
+    const ws = resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)
     const out = await initProject(ws.root, { title: payload?.title })
     const board = await loadBoard(ws.root)
     return { ok: true, value: { ...(await view(board, ws)), created: out.created, skipped: out.skipped } }
   },
 
   async boardSave(payload, ctx) {
-    const cwd = workspaceOf(ctx, payload?.sessionId)
+    const cwd = workspaceOf(ctx, payload?.sessionId, payload?.cwd)
     const id = payload?.id ? Number(payload.id) : undefined
     const title = String(payload?.title ?? '').trim()
     // 认领/交回/写 scope 都不改标题，所以只有新建卡才强制要一句标题
@@ -153,17 +153,17 @@ const methods = {
       verify: payload?.verify,
       after: Array.isArray(payload?.after) ? payload.after : undefined,
     })
-    return { ok: true, value: await view(await loadBoard(cwd), resolveWorkspace(ctx, payload?.sessionId)) }
+    return { ok: true, value: await view(await loadBoard(cwd), resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)) }
   },
 
   /** 三层决策：项目层 → 全局层 → 开场建议，永远给 3~5 条带提示词的动作。 */
   async suggest(payload, ctx) {
-    const cwd = workspaceOf(ctx, payload?.sessionId)
+    const cwd = workspaceOf(ctx, payload?.sessionId, payload?.cwd)
     return { ok: true, value: await suggest({ cwd }) }
   },
 
   async boardMove(payload, ctx) {
-    const cwd = workspaceOf(ctx, payload?.sessionId)
+    const cwd = workspaceOf(ctx, payload?.sessionId, payload?.cwd)
     const id = Number(payload?.id)
     if (!Number.isInteger(id) || id <= 0) return { ok: false, error: { code: 'bad-id', message: '卡号不对' } }
     const note = String(payload?.note ?? '').trim()
@@ -177,7 +177,7 @@ const methods = {
     } catch (e) {
       return { ok: false, error: { code: 'no-card', message: String(e?.message ?? e) } }
     }
-    return { ok: true, value: await view(await loadBoard(cwd), resolveWorkspace(ctx, payload?.sessionId)) }
+    return { ok: true, value: await view(await loadBoard(cwd), resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)) }
   },
 
   /**
@@ -186,7 +186,7 @@ const methods = {
    * 面板点一下就走这里，所以状态和各处建议是同一帧刷新的，不会各说各话。
    */
   async boardAct(payload, ctx) {
-    const cwd = workspaceOf(ctx, payload?.sessionId)
+    const cwd = workspaceOf(ctx, payload?.sessionId, payload?.cwd)
     const id = Number(payload?.id)
     if (!Number.isInteger(id) || id <= 0) return { ok: false, error: { code: 'bad-id', message: '卡号不对' } }
     const action = String(payload?.action ?? '').trim()
@@ -205,7 +205,7 @@ const methods = {
     const nextBoard = await loadBoard(cwd)
     return {
       ok: true,
-      value: { ...(await view(nextBoard, resolveWorkspace(ctx, payload?.sessionId))), touched: { id: touched.id, state: touched.state } },
+      value: { ...(await view(nextBoard, resolveWorkspace(ctx, payload?.sessionId, payload?.cwd))), touched: { id: touched.id, state: touched.state } },
     }
   },
 }
@@ -266,7 +266,7 @@ export function workspaceOf(ctx, sessionId, fallbackCwd) {
 }
 
 /** 会话原始 cwd + 上溯后的项目根，两个都要：前者用来提示「你在子目录里」。 */
-export function resolveWorkspace(ctx, sessionId) {
+export function resolveWorkspace(ctx, sessionId, fallbackCwd) {
   let cwd = ''
   try {
     const sessions = ctx.get('sessions')
@@ -276,7 +276,7 @@ export function resolveWorkspace(ctx, sessionId) {
   } catch {
     /* 没有 sessions 服务就当成没有 cwd */
   }
-  const root = cwd ? projectRoot(cwd) : workspaceOf(ctx, sessionId)
+  const root = cwd ? projectRoot(cwd) : workspaceOf(ctx, sessionId, fallbackCwd)
   return { cwd: cwd || root, root, name: projectName(root), rel: relFrom(root, cwd) }
 }
 

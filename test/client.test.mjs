@@ -471,3 +471,66 @@ test('看板：完成要先写结论；写完卡片落进完成组，建议跟�
   assert.match(text, /完成 · 1/, '卡片要真的落进完成组')
   assert.match(text, /重开/, '结束的卡要给重开入口——废弃不是删掉')
 })
+
+// 人切会话，右栏跟着换项目：这是真机上最刺眼的一条——切过去还停在上一块板上。
+test('面板半：换会话就换板，请求带上是哪个会话、在哪个目录', async () => {
+  const mk = (cardTitle) => ({
+    ok: true,
+    value: {
+      cwd: '/proj',
+      root: '/proj',
+      project: { name: 'proj', initialized: true, missing: [], rel: '', mapId: null },
+      dir: '/proj/.pstack/board',
+      next: null,
+      cards: [{ id: 1, kind: 'task', state: 'todo', title: cardTitle, body: '', progress: 0, next: null }],
+      frontier: [1],
+      conflicts: { pairs: [], unscoped: [] },
+      map: null,
+    },
+  })
+  let which = 'A'
+  const board = mk('A 项目的卡')
+  const boardB = mk('B 项目的卡')
+  const calls = []
+  const { got } = boot((method, payload) => {
+    if (method === 'board') {
+      calls.push({ method, payload })
+      return which === 'A' ? board : boardB
+    }
+    if (method === 'suggest') return { ok: true, value: { layer: 'project', items: [] } }
+    return catalogOk
+  })
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  Pane({ sessionId: 'sA', cwd: '/projA' })
+  await tick()
+  assert.match(textOf(Pane({ sessionId: 'sA', cwd: '/projA' })), /A 项目的卡/)
+
+  which = 'B'
+  Pane({ sessionId: 'sB', cwd: '/projB' })
+  await tick()
+  const text = textOf(Pane({ sessionId: 'sB', cwd: '/projB' }))
+  assert.match(text, /B 项目的卡/, '切了会话就得是那个会话项目的板')
+  assert.doesNotMatch(text, /A 项目的卡/, '上一块板不能留着')
+  const last = calls[calls.length - 1].payload
+  assert.equal(last.sessionId, 'sB', '请求要说明是哪个会话')
+  assert.equal(last.cwd, '/projB', '请求要带上会话的工作目录，宿主不必去猜')
+})
+
+test('面板半：宿主从 useSessions 喂会话时也认（tab 的 sessionId 有时是空的）', async () => {
+  const calls = []
+  const { got } = boot((method, payload) => {
+    if (method === 'board') {
+      calls.push(payload)
+      return { ok: true, value: { cwd: '/p', root: '/p', project: { name: 'p', initialized: true, missing: [], rel: '', mapId: null }, dir: '/p/.pstack/board', next: null, cards: [], frontier: [], conflicts: { pairs: [], unscoped: [] }, map: null } }
+    }
+    if (method === 'suggest') return { ok: true, value: { layer: 'seed', items: [] } }
+    return catalogOk
+  })
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  const useSessions = (pick) => pick({ current: 'live-1', byId: { 'live-1': { cwd: '/live/proj' } } })
+  Pane({ useSessions })
+  await tick()
+  assert.equal(calls.length > 0, true, '没有 sessionId 也要去取板')
+  assert.equal(calls[calls.length - 1].sessionId, 'live-1')
+  assert.equal(calls[calls.length - 1].cwd, '/live/proj')
+})

@@ -321,8 +321,10 @@ test('建议工具：给 3~5 条，每条都带能直接发的提示词', async 
     tools.apply(ctx)
     const t = out.tools.find((x) => x.name === 'pstack_suggest')
     const empty = await t.execute({ dir }, {})
-    assert.match(empty, /先起个头/)
-    assert.match(empty, /\/in-your-own-words/)
+    // 空项目：要么给开场建议（先起个头），要么去别的项目里翻出真活（看别的项目）——
+    // 后者取决于这台机器上别的项目有没有板，别把断言钉死在环境上。
+    assert.match(empty, /先起个头|看别的项目/)
+    assert.match(empty, /\/in-your-own-words|\/figure-it-out|\/architect|\/tdd/)
 
     const { saveCard } = await import('../src/board.js')
     await saveCard(dir, { kind: 'bug', title: '登录后偶发 401，刷新一次就好', body: 'Safari 复现' })

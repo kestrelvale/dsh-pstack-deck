@@ -32,6 +32,9 @@ window.__ModuleLoader__.load({
       throw new Error((res && res.error && (res.error.message || res.error.code)) || '宿主没有响应')
     }
 
+    // ponytail: 一份 store 服务所有会话面板。右栏同一时刻只显示一个会话，所以切过去
+    // 会先清空再按新会话读；真要做成「两个会话并排各看各的板」，得把这块换成
+    // Map<sid, store> 并按 sid 取（deck 就是这么干的），代价是每个读取点都要带上 sid。
     const store = {
       catalog: null,
       error: '',
@@ -48,6 +51,7 @@ window.__ModuleLoader__.load({
       node: null, // 流程图里下钻的卡号
       view: 'board', // board | skills —— 默认看板：进来先看到「这个项目要干什么」，而不是 58 个技能名
       sid: '', // 会话号：看板要用它换出这个会话的项目目录
+      cwd: '', // 这个会话的工作目录：面板自己先给，宿主就不必再猜
       board: null,
       sug: null, // 三层决策给出的 3~5 条建议
       idea: '', // 新卡标题
@@ -345,14 +349,18 @@ window.__ModuleLoader__.load({
       { key: 'out', label: '不做什么' },
     ]
 
+    // 每个请求都带 sid + cwd：宿主那边按会话反查 cwd 会失败（插件 ctx 里不一定有 sessions 服务），
+    // 面板这边从 useSessions 拿到的 cwd 才是准的。
+    const q = (extra) => ({ sessionId: store.sid, cwd: store.cwd, ...extra })
+
     const loadBoard = async () => {
       try {
-        set({ board: await rpc('board', { sessionId: store.sid }) })
+        set({ board: await rpc('board', q()) })
       } catch (e) {
         set({ toast: '读不到看板：' + String((e && e.message) || e), toastAt: Date.now() })
       }
       try {
-        set({ sug: await rpc('suggest', { sessionId: store.sid }) })
+        set({ sug: await rpc('suggest', q()) })
       } catch (e) {
         set({ sug: null })
       }
@@ -374,10 +382,10 @@ window.__ModuleLoader__.load({
           const open = store.sugOpen === it.id
           const doIt = async (method, payload, ok) => {
             try {
-              const view = await rpc(method, { sessionId: store.sid, ...payload })
+              const view = await rpc(method, q(payload))
               const patch = { board: view, toast: ok, toastAt: Date.now() }
               try {
-                patch.sug = await rpc('suggest', { sessionId: store.sid })
+                patch.sug = await rpc('suggest', q())
               } catch {
                 /* 建议取不到不影响这次动作 */
               }
@@ -431,7 +439,7 @@ window.__ModuleLoader__.load({
                     onClick: async () => {
                       if (it.cardId && it.state !== 'doing' && !it.ask) {
                         try {
-                          await rpc('boardAct', { sessionId: store.sid, id: it.cardId, action: 'claim', owner: store.sid || 'me' })
+                          await rpc('boardAct', q({ id: it.cardId, action: 'claim', owner: store.sid || 'me' }))
                         } catch {
                           /* 被挡着或已有人认领，注入照做 */
                         }
@@ -492,10 +500,10 @@ window.__ModuleLoader__.load({
       // 否则卡片落进「完成」但推荐还停在上一条，人就会以为没生效。
       const call = async (method, payload, okText) => {
         try {
-          const view = await rpc(method, { sessionId: store.sid, ...payload })
+          const view = await rpc(method, q(payload))
           const patch = { board: view, toast: okText, toastAt: Date.now() }
           try {
-            patch.sug = await rpc('suggest', { sessionId: store.sid })
+            patch.sug = await rpc('suggest', q())
           } catch {
             /* 建议取不到不该挡住这次动作 */
           }
@@ -687,7 +695,7 @@ window.__ModuleLoader__.load({
       const prompt = it ? it.prompt : skill ? '/' + skill + ' #' + card.id + ' ' + card.title : ''
       const go = async (method, payload, ok) => {
         try {
-          set({ board: await rpc(method, { sessionId: store.sid, ...payload }), toast: ok, toastAt: Date.now() })
+          set({ board: await rpc(method, q(payload)), toast: ok, toastAt: Date.now() })
           set({ node: null })
           loadBoard()
         } catch (e) {
@@ -839,15 +847,29 @@ window.__ModuleLoader__.load({
     const Panel = (props) => {
       useStore()
       const cat = store.catalog
+      // 面板是跟着会话走的：切了会话，看板就得换成那个会话所在的项目。
+      // 宿主喂会话身份的入口不止一个（tab 的 sessionId、会话 store 的 hook、scope），
+      // 只认其中一个就会卡在上一块板上——人是照着右栏看的，那看起来就是「没刷新」。
+      const useSessions = props && typeof props.useSessions === 'function' ? props.useSessions : null
+      const liveSid = useSessions ? useSessions((x) => (x && x.current) || '') : ''
+      const sidNow = String((props && (props.sessionId || (props.scope && props.scope.sessionId))) || liveSid || '')
+      // 会话目录也从同一处拿：别等下一轮渲染再从 store.sid 反查，
+      // 那会先用空 cwd 发一次请求，宿主就得靠猜（猜错就是别人的板）。
+      const liveCwd = useSessions
+        ? useSessions((x) => (x && x.byId && sidNow && x.byId[sidNow] ? x.byId[sidNow].cwd || '' : ''))
+        : ''
+      const cwdNow = String(liveCwd || (props && props.cwd) || '')
       React.useEffect(() => { if (!cat && store.loading) load(false) }, [])
       React.useEffect(() => { if (!store.upd) checkUpd(false) }, [])
       React.useEffect(() => {
-        if (props && props.sessionId && props.sessionId !== store.sid) set({ sid: props.sessionId })
-      }, [props && props.sessionId])
-      // 默认就站在看板上，所以不用等谁点一下才去读
+        if (!sidNow || (sidNow === store.sid && cwdNow === store.cwd)) return
+        // 换会话时先把上一块板和它的建议清掉，否则新会话会先闪出别人的卡
+        set({ sid: sidNow, cwd: cwdNow, board: null, sug: null, sugOpen: null, node: null, finish: null, detail: null, open: null })
+      }, [sidNow, cwdNow])
+      // 默认就站在看板上，所以不用等谁点一下才去读；会话一变这里跟着重读
       React.useEffect(() => {
-        if (store.view === 'board' && !store.board) loadBoard()
-      }, [store.view, store.sid])
+        if (store.view === 'board' && store.sid) loadBoard()
+      }, [store.view, store.sid, store.cwd])
       // agent 干活是在会话里写的盘，面板不长眼睛。站在看板上就每 4 秒自己对一次，
       // 它一收尾这里就跟着动——不然人会一直盯着一个不动的「在做」。
       React.useEffect(() => {
