@@ -110,6 +110,8 @@ const boardView = async () => {
   const map = mapOf(b.cards)
   return {
     cwd: proj,
+    root: proj,
+    project: { name: proj.split('/').pop(), initialized: true, missing: [], rel: '', mapId: map?.id ?? null },
     dir: b.dir,
     cards,
     next: nextOf(cards),
@@ -131,7 +133,12 @@ const win = {
 new Function('window', code)(win)
 
 const slots = []
+const disposers = []
 const ctx = {
+  // cordis 语义：effect 立刻跑一遍，卸载时调用它返回的 disposer
+  effect(fn) { const d = fn(); if (typeof d === 'function') disposers.push(d) },
+  // 真宿主里服务就绪才回调；预览里一切就绪，直接跑
+  inject(_names, fn) { fn() },
   get(name) {
     if (name === 'slots') return { register: (def, Comp) => slots.push({ def, Comp }), inject: (_n, fn) => fn() }
     if (name === 'sidebarRightTabs') return { register: () => () => {} }
@@ -160,7 +167,27 @@ const ctx = {
               // 演示「有新版本」长什么样：假装 npm 上多了一个 0.2.0
               return Promise.resolve({ ok: true, value: { current: '0.1.0', latest: '0.2.0', hasUpdate: true, cached: false, error: '' } })
             }
-            if (req && req.method === 'board') return boardView().then((value) => ({ ok: true, value }))
+            if (req && req.method === 'board') {
+              // init 模式：演示「项目还没初始化」那张卡长什么样
+              if (process.argv[3] === 'init') {
+                return Promise.resolve({
+                  ok: true,
+                  value: {
+                    cwd: join(proj, 'src', 'export'),
+                    root: proj,
+                    project: { name: proj.split('/').pop(), initialized: false, missing: ['board', 'readme', 'agents'], rel: 'src/export', mapId: null },
+                    dir: join(proj, '.pstack', 'board'),
+                    cards: [],
+                    next: null,
+                    graph: { nodes: [], edges: [], lines: [], depthMax: 0 },
+                    frontier: [],
+                    conflicts: { pairs: [], unscoped: [] },
+                    map: null,
+                  },
+                })
+              }
+              return boardView().then((value) => ({ ok: true, value }))
+            }
             if (req && req.method === 'suggest') return suggest({ cwd: proj, roots: [] }).then((value) => ({ ok: true, value }))
             return Promise.resolve(payload)
           },
@@ -180,7 +207,7 @@ await new Promise((r) => setTimeout(r, 300))
 
 // 可选第二参数：`board` 切到看板；其他值当成技能名点开详情
 const openName = process.argv[3]
-if (openName === 'board' || openName === 'flow' || openName === 'drill') {
+if (openName === 'board' || openName === 'flow' || openName === 'drill' || openName === 'init') {
   const tree = React.createElement(Panel, { sessionId: 'preview' })
   const walk = (node, label = '看板') => {
     if (!node || typeof node !== 'object') return false
@@ -207,7 +234,7 @@ if (openName === 'board' || openName === 'flow' || openName === 'drill') {
     await new Promise((r) => setTimeout(r, 200))
   }
 }
-if (openName && openName !== 'board' && openName !== 'flow' && openName !== 'drill') {
+if (openName && !['board', 'flow', 'drill', 'init'].includes(openName)) {
   const seen = new Set()
   const click = (node) => {
     if (!node || typeof node !== 'object') return false

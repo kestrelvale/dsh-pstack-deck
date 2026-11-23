@@ -21,9 +21,11 @@ import {
   stateZh,
   STATES,
 } from './board.js'
+import { projectRoot } from './anchor.js'
 import { buildCatalog, repoRoot, zhRoot, RANK } from './catalog.js'
+import { detectInit, initProject } from './init.js'
 import { suggest } from './suggest.js'
-import { workspaceOf } from './host.js'
+import { resolveWorkspace, workspaceOf } from './host.js'
 import { zhOf } from './i18n.js'
 
 export const name = 'dsh-pstack-deck/tools'
@@ -310,6 +312,35 @@ export function apply(ctx) {  const tools = ctx?.tools
     timeoutMs: TIMEOUT,
     output: text,
     execute: (args, exec) => boardTool(args, exec, ctx),
+  })
+
+  tools.register({
+    name: 'pstack_init',
+    description:
+      '初始化一个项目的看板：建 .pstack/board/ 的地图卡、.pstack/README.md、并在 AGENTS.md 里留一段「## 项目看板」，'
+      + '让以后每个会话的 agent 都知道开工先看板。重复调用安全，已存在的不重写。',
+    parameters: {
+      type: 'object',
+      properties: {
+        dir: { type: 'string', description: '项目路径；不给就用当前会话的项目根' },
+        title: { type: 'string', description: '地图卡标题，默认「<项目名> 的路线图」' },
+      },
+      additionalProperties: false,
+    },
+    timeoutMs: TIMEOUT,
+    output: text,
+    execute: async (args, exec) => {
+      const raw = String(args?.dir ?? '').trim() || exec?.cwd || process.cwd()
+      const root = projectRoot(raw)
+      const before = await detectInit(root)
+      const out = await initProject(root, { title: args?.title })
+      return [
+        before.initialized ? `这个项目已经初始化过了：${root}` : `初始化完成：${root}`,
+        out.created.length ? '新建：' + out.created.join('、') : '',
+        out.skipped.length ? '已有、没动：' + out.skipped.join('、') : '',
+        out.initialized ? '看板已经可用，调 pstack_board op="list" 看板。' : `还缺：${out.missing.join('、')}`,
+      ].filter(Boolean).join('\n')
+    },
   })
 
   tools.register({

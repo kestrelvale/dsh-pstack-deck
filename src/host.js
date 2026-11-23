@@ -26,7 +26,9 @@ import {
   saveCard,
   stateZh,
 } from './board.js'
+import { projectName, projectRoot, relFrom } from './anchor.js'
 import { buildCatalog, toProviderItem, repoRoot, zhRoot, PROVIDER, PKG_ROOT } from './catalog.js'
+import { detectInit, initProject } from './init.js'
 import { suggest } from './suggest.js'
 import { checkUpdate } from './update.js'
 import { zhOf } from './i18n.js'
@@ -116,9 +118,17 @@ const methods = {
   // ---------------------------------------------------------------- 看板
 
   async board(payload, ctx) {
-    const cwd = workspaceOf(ctx, payload?.sessionId)
-    const board = await loadBoard(cwd)
-    return { ok: true, value: view(board) }
+    const ws = resolveWorkspace(ctx, payload?.sessionId)
+    const board = await loadBoard(ws.root)
+    return { ok: true, value: await view(board, ws) }
+  },
+
+  /** 初始化：把一个陌生项目变成「有板可看」。重复点是安全的。 */
+  async init(payload, ctx) {
+    const ws = resolveWorkspace(ctx, payload?.sessionId)
+    const out = await initProject(ws.root, { title: payload?.title })
+    const board = await loadBoard(ws.root)
+    return { ok: true, value: { ...(await view(board, ws)), created: out.created, skipped: out.skipped } }
   },
 
   async boardSave(payload, ctx) {
@@ -139,7 +149,7 @@ const methods = {
       verify: payload?.verify,
       after: Array.isArray(payload?.after) ? payload.after : undefined,
     })
-    return { ok: true, value: view(await loadBoard(cwd)) }
+    return { ok: true, value: await view(await loadBoard(cwd), resolveWorkspace(ctx, payload?.sessionId)) }
   },
 
   /** 三层决策：项目层 → 全局层 → 开场建议，永远给 3~5 条带提示词的动作。 */
@@ -160,12 +170,12 @@ const methods = {
     } catch (e) {
       return { ok: false, error: { code: 'no-card', message: String(e?.message ?? e) } }
     }
-    return { ok: true, value: view(await loadBoard(cwd)) }
+    return { ok: true, value: await view(await loadBoard(cwd), resolveWorkspace(ctx, payload?.sessionId)) }
   },
 }
 
-/** 面板要的形状：卡 + 每张卡的下一步建议 + 全局下一步。 */
-function view(board) {
+/** 面板要的形状：卡 + 每张卡的下一步建议 + 全局下一步 + 这是哪个项目、初始化到哪一步。 */
+async function view(board, ws) {
   // blocked 与 next 一起下发：面板不用自己重算依赖，看到的和宿主推的是同一份判断
   const cards = board.cards.map((c) => ({
     ...c,
@@ -175,8 +185,12 @@ function view(board) {
   }))
   const next = nextOf(cards)
   const map = mapOf(board.cards)
+  const where = ws ?? { cwd: board.cwd, root: board.cwd, name: projectName(board.cwd), rel: '' }
+  const init = await detectInit(where.root)
   return {
-    cwd: board.cwd,
+    cwd: where.cwd,
+    root: where.root,
+    project: { name: init.name, missing: init.missing, initialized: init.initialized, rel: where.rel, mapId: init.mapId },
     dir: board.dir,
     cards,
     next,
@@ -194,20 +208,36 @@ export function apply(ctx) {
 
 /**
  * 看板落在哪个项目里：面板发请求时带上会话号，宿主用 sessions 服务把它换成
- * 那个会话的工作目录。拿不到就退回进程 cwd —— 宁可落在错的地方让人看见，
- * 也不要静悄悄写到别处去。
+ * 那个会话的工作目录，再上溯到项目根（会话 cwd 常常是 src/ 这种子目录，
+ * 跟着 cwd 走会看见一块和根目录不相通的空板）。
+ * 拿不到会话就退回进程 cwd —— 宁可落在错的地方让人看见，也不要静悄悄写到别处去。
  */
 export function workspaceOf(ctx, sessionId) {
   try {
     const sessions = ctx.get('sessions')
     const session = sessionId && sessions && typeof sessions.get === 'function' ? sessions.get(sessionId) : null
     const cwd = session?.header?.cwd
-    if (typeof cwd === 'string' && cwd) return cwd
+    if (typeof cwd === 'string' && cwd) return projectRoot(cwd)
   } catch {
     /* sessions 服务不在就往下退 */
   }
   // 兜底也不能写进应用包里：那个目录是只读的，而且不是人的项目
   return join(homedir(), '.dsh', 'pstack-board', 'unbound')
+}
+
+/** 会话原始 cwd + 上溯后的项目根，两个都要：前者用来提示「你在子目录里」。 */
+export function resolveWorkspace(ctx, sessionId) {
+  let cwd = ''
+  try {
+    const sessions = ctx.get('sessions')
+    const session = sessionId && sessions && typeof sessions.get === 'function' ? sessions.get(sessionId) : null
+    const raw = session?.header?.cwd
+    if (typeof raw === 'string') cwd = raw
+  } catch {
+    /* 没有 sessions 服务就当成没有 cwd */
+  }
+  const root = cwd ? projectRoot(cwd) : workspaceOf(ctx, sessionId)
+  return { cwd: cwd || root, root, name: projectName(root), rel: relFrom(root, cwd) }
 }
 
 function registerProvider(ctx) {

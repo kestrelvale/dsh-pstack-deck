@@ -467,7 +467,24 @@ window.__ModuleLoader__.load({
         { key: 'later', label: '被挡着', rows: open.filter((c) => (c.blocked || []).length) },
       ].filter((x) => x.rows.length)
 
+      const proj = b.project || null
+      const initCard = proj && !proj.initialized
+        ? h('div', { key: 'init', style: { ...s.card(false), borderColor: '#f0b132', cursor: 'default', marginBottom: 10 } }, [
+          h('div', { key: 't', style: { fontWeight: 650, marginBottom: 6 } }, `这个项目还没初始化：${proj.name}`),
+          h('div', { key: 'd', style: { color: C.dim, fontSize: 12, lineHeight: 1.65 } }, '初始化只在这个项目里写三样东西，都是能提交进仓库的纯文本：'),
+          ...[
+            '一张地图卡（去向 / 已经定了 / 还没想清 / 不做什么）放进 .pstack/board/',
+            '.pstack/README.md，说明一卡一文件、字段怎么手改',
+            `AGENTS.md 里的「## 项目看板」段，让以后每个会话的 agent 开工先看板`,
+          ].map((t, i) => h('div', { key: 'l' + i, style: { color: C.dim, fontSize: 12, lineHeight: 1.65 } }, '· ' + t)),
+          h('button', { key: 'go', style: { ...s.btn('primary'), marginTop: 8 }, onClick: () => call('init', {}, '初始化好了') }, '初始化这个项目'),
+        ])
+        : null
+
       return h('div', { style: s.body }, [
+        h('div', { key: 'proj', style: { ...s.faint, fontSize: 10, marginBottom: 8, wordBreak: 'break-all' } },
+          `📁 ${proj ? proj.name : ''} · ${b.root || b.cwd}${proj && proj.rel ? `（当前是它的子目录：${proj.rel}）` : ''}`),
+        initCard,
         h(Suggest, { key: 'sug' }),
 
         h('div', { key: 'add', style: { display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap' } }, [

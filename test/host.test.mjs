@@ -113,7 +113,7 @@ test('宿主半：/api/psp 走 POST 信封，catalog 与 skill 都能取', async
 test('工具半：pstack_list 有清单，pstack_use 给正文，坏名字报错', async () => {
   const { ctx, out } = fakeCtx()
   tools.apply(ctx)
-  assert.deepEqual(out.tools.map((t) => t.name).sort(), ['pstack_board', 'pstack_install', 'pstack_list', 'pstack_suggest', 'pstack_use'])
+  assert.deepEqual(out.tools.map((t) => t.name).sort(), ['pstack_board', 'pstack_init', 'pstack_install', 'pstack_list', 'pstack_suggest', 'pstack_use'])
 
   const list = out.tools.find((t) => t.name === 'pstack_list')
   const text = await list.execute({}, {})
@@ -223,6 +223,40 @@ test('看板：路由能建卡、改状态、给出下一步，卡落在项目�
     assert.equal(noChange.result.ok, false)
     const noCard = await rpc('b6', 'boardMove', { sessionId: 's1', id: 42, note: 'x' })
     assert.equal(noCard.result.ok, false)
+  } finally {
+    await rm(proj, { recursive: true, force: true })
+  }
+})
+
+test('初始化：路由能把空项目变成有板可看，子目录会话也落在项目根', async () => {
+  const { mkdtemp, mkdir, rm, readFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const proj = await mkdtemp(join(tmpdir(), 'pstack-init-route-'))
+  try {
+    await mkdir(join(proj, '.git'))
+    await mkdir(join(proj, 'src', 'api'), { recursive: true })
+
+    // 会话 cwd 在子目录里：看板必须落在项目根，否则根目录和子目录会是两块不相通的板
+    const { ctx, out } = fakeCtx({ cwd: join(proj, 'src', 'api'), sid: 's2' })
+    host.apply(ctx)
+    const route = out.routes[0]
+    const rpc = async (rpcId, method, payload) =>
+      (await post(route, { type: 'client-request', rpcId, payload: { method, payload } })).json()
+
+    const empty = await rpc('i0', 'board', { sessionId: 's2' })
+    assert.equal(empty.result.value.root, proj)
+    assert.equal(empty.result.value.project.initialized, false)
+    assert.equal(empty.result.value.project.rel, 'src/api')
+    assert.deepEqual(empty.result.value.project.missing, ['board', 'readme', 'agents'])
+
+    const done = await rpc('i1', 'init', { sessionId: 's2' })
+    assert.equal(done.result.value.project.initialized, true)
+    assert.equal(done.result.value.created.length, 3)
+    assert.equal(done.result.value.cards[0].kind, 'map')
+    assert.match(await readFile(join(proj, 'AGENTS.md'), 'utf8'), /## 项目看板/)
+
+    const again = await rpc('i2', 'init', { sessionId: 's2' })
+    assert.deepEqual(again.result.value.created, [], '重复初始化不重写')
   } finally {
     await rm(proj, { recursive: true, force: true })
   }

@@ -26,6 +26,10 @@
 
 ![技能详情](docs/preview-detail.png)
 
+**项目还没初始化** —— 面板顶部先告诉你板在哪个项目、当前是不是它的子目录，然后给一张初始化卡，点一下就把三样东西写进这个项目。
+
+![初始化](docs/preview-init.png)
+
 **项目看板** —— 顶部是 3~5 条带现成提示词的建议，下面按「可开工 / 在做 / 完成 / 被挡着」分组，每张卡带推荐技能、紧急度与把握。
 
 ![项目看板](docs/preview-board.png)
@@ -238,6 +242,7 @@ agent 自己也能用：
 | `pstack_list` | 列技能（按 `query` / `group` 过滤） |
 | `pstack_use` | 取一个技能的正文，当作这次任务的操作说明（有中文就用中文） |
 | `pstack_suggest` | 给 3~5 条带现成提示词的建议 |
+| `pstack_init` | 初始化一个项目的板：地图卡 + `.pstack/README.md` + `AGENTS.md` 里的看板段 |
 | `pstack_board` | 看板：`list / add / move / claim / release / next` |
 | `pstack_install` | 把技能装进某个项目的 `.dsh/skills`，让那个项目新开的会话也能用 |
 
@@ -276,6 +281,35 @@ verify: node --test 全绿  # 做完的证据
 - 2026-11-23 [在做] 抓到请求头里少了 cookie
 ```
 
+### 跟着项目走：先找到项目根，再谈板
+
+会话的 cwd 常常是项目里的子目录（`src/api`），跟着 cwd 落盘就会在同一个项目里长出好几块互相看不见的板。所以看板位置由**项目根**决定：
+
+1. 从会话 cwd 往上找，最近一个带 `.pstack/` 或 `.git/` 的目录就是项目根；
+2. 板落在 `<项目根>/.pstack/board/`，子目录里的会话读到的还是同一块板；
+3. 面板顶部一直显示「当前是哪个项目、板在哪个路径」，会话在子目录里时会额外标出相对路径。
+
+### 初始化：一个陌生项目怎么长出板
+
+刚装好插件打开一个新项目，看到的应该是「这个项目还没初始化」而不是一块空板。面板上那张卡只做一件事，写三样东西——全是能提交进仓库的纯文本：
+
+| 写什么 | 为什么 |
+|---|---|
+| `.pstack/board/1-<slug>.md` 一张地图卡 | 四段骨架（去向 / 已经定了 / 还没想清 / 不做什么），先想清这次要去哪 |
+| `.pstack/README.md` | 这个目录是什么、一卡一文件、字段怎么手改 |
+| `AGENTS.md` 里的 `## 项目看板` 段 | 让以后每个会话的 agent 都知道开工先看板，而不是只靠人记得 |
+
+重复初始化是安全的：已经存在的文件一样都不重写，`AGENTS.md` 里原有内容不会被冲掉。
+
+命令行走同一条路：
+
+```bash
+# 在会话里让 agent 调，或从面板点
+pstack_init { "dir": "/Users/me/proj" }
+```
+
+> 对照：[matt deck](https://github.com/FeatherHunter/dsh-mattpocock-skills-deck) 的初始化是「注入一句 `/setup-matt-pocock-skills` 提示词，让 AI 按技能产出 `docs/agents/*.md`」，因为它要人拍板选 issue tracker 后端与域文档布局。pstack 这边的产物是固定的四段 markdown，写死更快也不会跑偏；哪天加上需要人拍板的选项，再退回注入提示词那条路。
+
 ### 多任务并行：四种打架方式，四个字段
 
 | 会怎么出错 | 挡它的字段 |
@@ -305,7 +339,9 @@ verify: node --test 全绿  # 做完的证据
 src/
   catalog.js   读 repo/skills 的 frontmatter、分组、依赖闭包、与 ~/.dsh/skills 对比漂移
   i18n.js      58 条中文一句话 + 分组名 + 五步上手引导
-  host.js      技能 provider、POST /api/psp（catalog / skill / board / suggest / update）
+  host.js      技能 provider、POST /api/psp（catalog / skill / board / init / suggest / update）
+  anchor.js    从会话 cwd 上溯到项目根（先认 .pstack，再认 .git）
+  init.js      初始化：地图卡 + .pstack/README.md + AGENTS.md 的看板段
   board.js     看板读写、依赖图、frontier、scope 冲突、地图四段
   suggest.js   三层决策（项目层 → 全局层 → 开场层）
   update.js    问 npm 有没有新版本（数字比版本、只缓存 latest）
@@ -314,14 +350,14 @@ src/
 zh/            58 篇中文正文（与 repo/skills 逐篇对齐，npm run check:zh 校验）
 repo/          pstack 上游只读快照（skills / plugin.json / LICENSE）
 scripts/       sync-skills（推到 ~/.dsh/skills）、check-zh、preview（自渲染截图）、dev（热循环）
-test/          node --test，46 条
+test/          node --test，51 条
 docs/          parallel-tasks.md + 面板截图
 ```
 
 ## 开发
 
 ```bash
-npm test           # 46 条：目录解析、路由信封、工具、看板、依赖图、建议、版本比较、客户端渲染
+npm test           # 51 条：目录解析、路由信封、工具、看板、初始化、项目锚定、依赖图、建议、版本比较、客户端渲染
 npm run dev        # 起一个临时宿主（默认 web profile :5599），改 src/ 自动重启
 npm run preview    # 用假 React 把面板渲染成 HTML，再用 Chrome 截图，不用起宿主
 npm run sync       # 把 repo/skills 推到 ~/.dsh/skills（--dry 只看差异）
@@ -370,6 +406,8 @@ npm publish --registry=https://registry.npmjs.org --access public
 - 地图「还没想清」的雾**不会自动毕业**成新卡，要人点一下。
 - 预期线路只画一步（推荐 → 完成），不画「完成之后接哪张」。
 - 中文正文是逐篇人工对齐翻译，上游改版后需要重跑 `npm run check:zh` 才发现漂移。
+- 项目根识别只认 `.pstack/` 与 `.git/`，没有这两个标记的项目会**退化成用会话 cwd**；monorepo 里各子包共享根目录那块板，不会自动分包。
+- 初始化只写文件、不改你已有的 `AGENTS.md` 结构；如果项目用 `CLAUDE.md` 而非 `AGENTS.md`，现在还没跟着写。
 
 ## 参考链接
 

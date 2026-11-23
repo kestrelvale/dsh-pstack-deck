@@ -216,6 +216,47 @@ test('面板半：看板视图列出卡和下一步，按钮点得动', async ()
   assert.match(text, /正在做|在做/)
 })
 
+test('看板：项目还没初始化时给一张初始化卡，点了就去建', async () => {
+  const board = {
+    ok: true,
+    value: {
+      cwd: '/proj/src/api',
+      root: '/proj',
+      project: { name: 'proj', initialized: false, missing: ['board', 'readme', 'agents'], rel: 'src/api', mapId: null },
+      dir: '/proj/.pstack/board',
+      next: null,
+      cards: [],
+      frontier: [],
+      conflicts: { pairs: [], unscoped: [] },
+      map: null,
+    },
+  }
+  const inited = {
+    ok: true,
+    value: { ...board.value, project: { ...board.value.project, initialized: true, missing: [] }, cards: [{ id: 1, kind: 'map', state: 'idea', title: 'proj 的路线图', body: '', progress: 0, next: null }], created: ['.pstack/board/1-proj-的路线图.md', '.pstack/README.md', 'AGENTS.md'] },
+  }
+  const seen = []
+  const { got } = boot((method) => {
+    seen.push(method)
+    if (method === 'suggest') return { ok: true, value: { layer: 'seed', items: [] } }
+    if (method === 'init') return inited
+    return method === 'board' ? board : catalogOk
+  })
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  Pane({ sessionId: 's10' })
+  await tick()
+  clickByText(Pane({ sessionId: 's10' }), '看板')
+  await tick()
+  const text = textOf(Pane({ sessionId: 's10' }))
+  assert.match(text, /这个项目还没初始化：proj/)
+  assert.match(text, /地图卡/)
+  assert.match(text, /当前是它的子目录：src\/api/, '子目录里的会话要说明板在项目根')
+  assert.equal(clickByText(Pane({ sessionId: 's10' }), '初始化这个项目'), true)
+  await tick()
+  assert.equal(seen.includes('init'), true, '点初始化要真的走宿主')
+  assert.doesNotMatch(textOf(Pane({ sessionId: 's10' })), /这个项目还没初始化/)
+})
+
 test('看板：流程图视图画出节点与箭头，废弃的单独标出', async () => {
   const board = {
     ok: true,
