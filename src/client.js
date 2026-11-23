@@ -42,6 +42,8 @@ window.__ModuleLoader__.load({
       detail: null,
       draft: '', // 详情页里「注入」后的原文，注入失败时给用户手抄
       zhOnly: false, // 有中文正文时默认显示中文，点一下切回原文
+      finish: null, // { id, state }：正在收尾哪张卡，收尾必须写一句结论
+      finNote: '',
       sugOpen: '', // 展开了哪条建议（看 Jev 分数和命令）
       node: null, // 流程图里下钻的卡号
       view: 'board', // board | skills —— 默认看板：进来先看到「这个项目要干什么」，而不是 58 个技能名
@@ -372,8 +374,14 @@ window.__ModuleLoader__.load({
           const open = store.sugOpen === it.id
           const doIt = async (method, payload, ok) => {
             try {
-              set({ board: await rpc(method, { sessionId: store.sid, ...payload }), toast: ok, toastAt: Date.now() })
-              loadBoard()
+              const view = await rpc(method, { sessionId: store.sid, ...payload })
+              const patch = { board: view, toast: ok, toastAt: Date.now() }
+              try {
+                patch.sug = await rpc('suggest', { sessionId: store.sid })
+              } catch {
+                /* 建议取不到不影响这次动作 */
+              }
+              set(patch)
             } catch (e) {
               set({ toast: String((e && e.message) || e), toastAt: Date.now() })
             }
@@ -415,18 +423,30 @@ window.__ModuleLoader__.load({
                   : null,
                 h('div', { key: 'c', style: { fontFamily: C.mono, fontSize: 11, background: 'rgba(0,0,0,.3)', border: '1px solid ' + C.line, borderRadius: 6, padding: '6px 8px', marginBottom: 8, userSelect: 'all', wordBreak: 'break-all' } }, it.prompt),
                 h('div', { key: 'a', style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } }, [
-                  h('button', { key: 'u', style: s.btn('primary'), onClick: () => inject(it.prompt) }, '执行这条命令'),
-                  it.cardId ? h('button', {
-                    key: 'c2',
-                    style: s.btn(),
-                    onClick: () => doIt('boardSave', { id: it.cardId, state: 'doing', owner: store.sid || 'me' }, `#${it.cardId} 归你了`),
-                  }, '我来做') : null,
+                  // 点「执行」= 认领 + 注入，一步到位：命令进了输入框，卡也已经在「在做」，
+                  // 两边不会一个走一个不动。
+                  h('button', {
+                    key: 'u',
+                    style: s.btn('primary'),
+                    onClick: async () => {
+                      if (it.cardId && it.state !== 'doing' && !it.ask) {
+                        try {
+                          await rpc('boardAct', { sessionId: store.sid, id: it.cardId, action: 'claim', owner: store.sid || 'me' })
+                        } catch {
+                          /* 被挡着或已有人认领，注入照做 */
+                        }
+                      }
+                      inject(it.prompt)
+                      loadBoard()
+                    },
+                  }, '执行这条命令'),
                   it.cardId ? h('button', {
                     key: 'd',
                     style: s.btn(),
-                    onClick: () => doIt('boardMove', { id: it.cardId, state: 'done', note: '做完' }, `#${it.cardId} 已完成`),
+                    onClick: () => set({ finish: { id: it.cardId, state: 'done' }, finNote: '', sugOpen: '' }),
                   }, '标为完成') : null,
                 ]),
+                it.cardId ? FinishEditor({ id: it.cardId, call: doIt }) : null,
               ])
               : null,
           ])
@@ -434,11 +454,52 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    // 收尾编辑器：完成和废弃都要一句结论才落盘。
+    // 这不是形式主义——没有结论的「已完成」，三天后没人知道当时到底做了什么、验没验。
+    const FinishEditor = ({ id, call }) => {
+      const fin = store.finish
+      if (!fin || fin.id !== id) return null
+      const isDrop = fin.state === 'dropped'
+      const go = () => {
+        const note = store.finNote.trim()
+        if (!note) {
+          set({ toast: isDrop ? '写一句为什么不做' : '写一句做成了什么', toastAt: Date.now() })
+          return
+        }
+        call('boardAct', { id, action: isDrop ? 'drop' : 'done', note }, isDrop ? '已废弃，可随时重开' : '已完成')
+        set({ finish: null, finNote: '' })
+      }
+      return h('div', { style: { border: '1px solid ' + (isDrop ? C.line : C.accent), borderRadius: 6, padding: 8, marginTop: 6, background: 'rgba(0,0,0,.18)' } }, [
+        h('div', { key: 'q', style: { ...s.faint, fontSize: 11, marginBottom: 4 } },
+          isDrop ? '为什么放掉？（会记进地图的「不做什么」）' : '做成了什么、验过什么？（会记进地图的「已经定了」）'),
+        h('textarea', {
+          key: 'n',
+          style: { ...s.input, minHeight: 54, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5 },
+          value: store.finNote,
+          placeholder: isDrop ? '这条路走不通，因为…' : '改了 X，跑了 Y，结果是 Z',
+          onChange: (e) => set({ finNote: e.target.value }),
+        }),
+        h('div', { key: 'b', style: { display: 'flex', gap: 6, marginTop: 6 } }, [
+          h('button', { key: 'ok', style: s.btn('primary'), onClick: go }, isDrop ? '确认废弃' : '确认完成'),
+          h('button', { key: 'no', style: s.btn(), onClick: () => set({ finish: null, finNote: '' }) }, '取消'),
+        ]),
+      ])
+    }
+
     const Board = () => {
       const b = store.board
+      // 一次动作 = 一次整体刷新：卡片状态和「建议接下来做这几件」必须同一帧更新，
+      // 否则卡片落进「完成」但推荐还停在上一条，人就会以为没生效。
       const call = async (method, payload, okText) => {
         try {
-          set({ board: await rpc(method, { sessionId: store.sid, ...payload }), toast: okText, toastAt: Date.now() })
+          const view = await rpc(method, { sessionId: store.sid, ...payload })
+          const patch = { board: view, toast: okText, toastAt: Date.now() }
+          try {
+            patch.sug = await rpc('suggest', { sessionId: store.sid })
+          } catch {
+            /* 建议取不到不该挡住这次动作 */
+          }
+          set(patch)
         } catch (e) {
           set({ toast: String((e && e.message) || e), toastAt: Date.now() })
         }
@@ -584,14 +645,25 @@ window.__ModuleLoader__.load({
             })(),
             h('div', { key: 'n', style: { marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } }, [
               c.next ? h('button', { key: 'u', style: { ...s.btn('primary'), padding: '2px 8px', fontSize: 11 }, onClick: () => inject('/' + c.next.skill + ' ' + c.title) }, '/' + c.next.skill) : null,
-              c.state !== 'done' && !c.owner && !(c.blocked || []).length ? h('button', { key: 'c', style: { ...s.btn('primary'), padding: '2px 8px', fontSize: 11 }, onClick: () => call('boardSave', { id: c.id, owner: store.sid || 'me', state: 'doing' }, '这张归你了') }, '我来做') : null,
+              c.state === 'done' || c.state === 'dropped'
+                ? h('button', { key: 're', style: { ...s.btn(), padding: '2px 8px', fontSize: 11 }, onClick: () => call('boardAct', { id: c.id, action: 'reopen', note: '再试一次' }, '已重开，回到待办') }, '重开')
+                : null,
+              c.state !== 'done' && c.state !== 'dropped' && !c.owner && !(c.blocked || []).length
+                ? h('button', { key: 'c', style: { ...s.btn('primary'), padding: '2px 8px', fontSize: 11 }, onClick: () => call('boardAct', { id: c.id, action: 'claim', owner: store.sid || 'me' }, '这张归你了') }, '我来做')
+                : null,
               (c.blocked || []).length ? h('span', { key: 'w', style: { ...s.faint, fontSize: 10 } }, `等 #${c.blocked.join(' #')}`) : null,
-              c.owner ? h('button', { key: 'r', style: { ...s.btn(), padding: '2px 8px', fontSize: 11 }, onClick: () => call('boardSave', { id: c.id, owner: '' }, '已交回') }, '交回') : null,
-              c.state !== 'doing' && c.state !== 'done' && c.owner ? h('button', { key: 'g', style: { ...s.btn(), padding: '2px 8px', fontSize: 11 }, onClick: () => call('boardMove', { id: c.id, state: 'doing', note: '开始' }, '开始做了') }, '开始') : null,
-              c.state !== 'done' ? h('button', { key: 'f', style: { ...s.btn(), padding: '2px 8px', fontSize: 11 }, onClick: () => call('boardMove', { id: c.id, state: 'done', note: '做完' }, '已完成') }, '完成') : null,
-              c.state !== 'dropped' ? h('button', { key: 'x', style: { ...s.btn(), padding: '2px 8px', fontSize: 11, color: C.faint }, onClick: () => call('boardMove', { id: c.id, state: 'dropped', note: '废弃' }, '已废弃') }, '废弃') : null,
+              c.owner && c.state !== 'done' && c.state !== 'dropped'
+                ? h('button', { key: 'r', style: { ...s.btn(), padding: '2px 8px', fontSize: 11 }, onClick: () => call('boardAct', { id: c.id, action: 'release' }, '已交回') }, '交回')
+                : null,
+              c.state !== 'done' && c.state !== 'dropped'
+                ? h('button', { key: 'f', style: { ...s.btn(), padding: '2px 8px', fontSize: 11 }, onClick: () => set({ finish: { id: c.id, state: 'done' }, finNote: '' }) }, '完成')
+                : null,
+              c.state !== 'done' && c.state !== 'dropped'
+                ? h('button', { key: 'x', style: { ...s.btn(), padding: '2px 8px', fontSize: 11, color: C.faint }, onClick: () => set({ finish: { id: c.id, state: 'dropped' }, finNote: '' }) }, '废弃')
+                : null,
               c.progress ? h('span', { key: 'p', style: { ...s.faint, fontSize: 10 } }, c.progress + ' 条进展') : null,
             ]),
+            FinishEditor({ id: c.id, call }),
           ])),
         ])),
       ])
@@ -622,6 +694,8 @@ window.__ModuleLoader__.load({
           set({ toast: String((e && e.message) || e), toastAt: Date.now() })
         }
       }
+      const act = (action, note) => go('boardAct', { id: card.id, action, note })
+      const closing = card.state === 'done' || card.state === 'dropped'
       return h('div', { style: { border: '1px solid ' + C.accent, borderRadius: 8, padding: '8px 10px', marginTop: 8, background: 'rgba(122,162,247,.10)' } }, [
         h('div', { key: 't', style: { fontWeight: 600, wordBreak: 'break-word' } }, `#${card.id} ${card.title}`),
         h('div', { key: 'm', style: { ...s.faint, fontSize: 10, marginTop: 2 } }, [
@@ -640,15 +714,23 @@ window.__ModuleLoader__.load({
           : null,
         h('div', { key: 'a', style: { display: 'flex', gap: 6, flexWrap: 'wrap' } }, [
           prompt ? h('button', { key: 'u', style: s.btn('primary'), onClick: () => inject(prompt) }, '执行这条命令') : null,
-          card.state !== 'doing'
-            ? h('button', { key: 's', style: s.btn(), onClick: () => go('boardSave', { id: card.id, state: 'doing', owner: store.sid || 'me' }, `#${card.id} 归你了`) }, '我来做')
-            : h('button', { key: 's2', style: s.btn(), onClick: () => go('boardSave', { id: card.id, owner: '' }, `#${card.id} 交回了`) }, '交回'),
+          card.state !== 'doing' && !closing && !(card.blocked || []).length
+            ? h('button', { key: 's', style: s.btn(), onClick: () => act('claim', undefined) }, '我来做')
+            : null,
+          card.owner && !closing
+            ? h('button', { key: 's2', style: s.btn(), onClick: () => act('release') }, '交回')
+            : null,
 
-          card.state !== 'done' ? h('button', { key: 'd', style: s.btn(), onClick: () => go('boardMove', { id: card.id, state: 'done', note: '做完' }, `#${card.id} 已完成`) }, '标记完成') : null,
-          card.state !== 'dropped' ? h('button', { key: 'x', style: { ...s.btn(), color: C.faint }, onClick: () => go('boardMove', { id: card.id, state: 'dropped', note: '废弃' }, '已废弃') }, '废弃') : null,
+          closing
+            ? h('button', { key: 're', style: s.btn('primary'), onClick: () => act('reopen', '再试一次') }, '重开')
+            : h('button', { key: 'd', style: s.btn(), onClick: () => set({ finish: { id: card.id, state: 'done' }, finNote: '' }) }, '标记完成'),
+          closing
+            ? null
+            : h('button', { key: 'x', style: { ...s.btn(), color: C.faint }, onClick: () => set({ finish: { id: card.id, state: 'dropped' }, finNote: '' }) }, '废弃'),
           h('div', { key: 'sp', style: { flex: 1 } }),
           h('button', { key: 'c0', style: { ...s.btn(), color: C.faint }, onClick: () => set({ node: null }) }, '收起'),
         ]),
+        FinishEditor({ id: card.id, call: go }),
       ])
     }
 
@@ -766,6 +848,19 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (store.view === 'board' && !store.board) loadBoard()
       }, [store.view, store.sid])
+      // agent 干活是在会话里写的盘，面板不长眼睛。站在看板上就每 4 秒自己对一次，
+      // 它一收尾这里就跟着动——不然人会一直盯着一个不动的「在做」。
+      React.useEffect(() => {
+        if (store.view !== 'board') return undefined
+        const t = setInterval(() => {
+          if (store.finish || store.node) return // 正在写结论或看下钻，别把输入冲掉
+          loadBoard()
+        }, 4000)
+        // 浏览器里 setInterval 返回数字；node 里（自渲染截图、测试的假 React）返回 Timeout。
+        // unref 一下，否则这些假环境会因为一个轮询永远退不出去。
+        if (t && typeof t.unref === 'function') t.unref()
+        return () => clearInterval(t)
+      }, [store.view])
       const toBoard = () => {
         set({ view: 'board' })
         if (!store.board) loadBoard()

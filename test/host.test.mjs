@@ -215,9 +215,24 @@ test('看板：路由能建卡、改状态、给出下一步，卡落在项目�
     assert.equal(moved.result.value.cards[0].progress, 1)
     assert.equal(moved.result.value.next.skill, 'correct', '在做中的 bug 该去把它变成规则')
 
-    const dropped = await rpc('b4', 'boardMove', { sessionId: 's1', id: card.id, state: 'dropped', note: '不修了' })
+    // 结束不再是「改个状态」，而是一次带结论的动作
+    const noNote = await rpc('b3x', 'boardAct', { sessionId: 's1', id: card.id, action: 'done' })
+    assert.equal(noNote.result.ok, false, '没写结论不能完成')
+    assert.match(noNote.result.error.message, /结论/)
+
+    const finished = await rpc('b3y', 'boardAct', { sessionId: 's1', id: card.id, action: 'done', note: '加了 cookie 重试' })
+    assert.equal(finished.result.value.cards[0].state, 'done')
+    assert.equal(finished.result.value.cards[0].answer, '加了 cookie 重试')
+    assert.equal(finished.result.value.next, null, '做完了就不该再推荐下一步')
+
+    const reopened = await rpc('b3z', 'boardAct', { sessionId: 's1', id: card.id, action: 'reopen', note: '还有一处没修' })
+    assert.equal(reopened.result.value.cards[0].state, 'todo', '废弃/完成的都能重开')
+    assert.equal(reopened.result.value.next.skill, 'tdd')
+
+    const dropped = await rpc('b4', 'boardAct', { sessionId: 's1', id: card.id, action: 'drop', note: '不修了，改用别的方案' })
     assert.equal(dropped.result.value.cards[0].state, 'dropped')
     assert.equal(dropped.result.value.next, null, '废弃了就不该再推荐下一步')
+    assert.equal(dropped.result.value.cards[0].owner, undefined)
 
     const noChange = await rpc('b5', 'boardMove', { sessionId: 's1', id: 1 })
     assert.equal(noChange.result.ok, false)
@@ -276,10 +291,20 @@ test('看板工具：list 给下一步，add 建卡，move 改状态', async () 
     const listed = await boardTool.execute({ op: 'list', dir: proj }, {})
     assert.match(listed, /下一步：\/figure-it-out/)
     assert.match(listed, /把导出改成流式/)
-    const moved = await boardTool.execute({ op: 'move', dir: proj, id: 1, state: 'done', note: '做完了' }, {})
-    assert.match(moved, /→ 完成/)
+    // 用 move 偷懒结束要被拦住：结束必须是一次带结论的动作
+    await assert.rejects(() => boardTool.execute({ op: 'move', dir: proj, id: 1, state: 'done' }, {}), /结束要走 op=done/)
+    await assert.rejects(() => boardTool.execute({ op: 'done', dir: proj, id: 1 }, {}), /结论/)
+
+    const done = await boardTool.execute({ op: 'done', dir: proj, id: 1, note: '导出改成流式了，跑过大文件' }, {})
+    assert.match(done, /→ 完成/)
+    assert.match(done, /结论已写进卡里/)
+
     const after = await boardTool.execute({ op: 'list', dir: proj }, {})
     assert.match(after, /没有开着的卡/)
+
+    const reopened = await boardTool.execute({ op: 'reopen', dir: proj, id: 1, note: '再补个空文件用例' }, {})
+    assert.match(reopened, /已重开/)
+    assert.doesNotMatch(await boardTool.execute({ op: 'list', dir: proj }, {}), /没有开着的卡/)
     await assert.rejects(() => boardTool.execute({ op: 'add', dir: proj, title: '  ' }, {}), /写一句/)
     await assert.rejects(() => boardTool.execute({ op: 'nope', dir: proj }, {}), /op 只能是/)
   } finally {

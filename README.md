@@ -5,7 +5,7 @@
 ![npm](https://img.shields.io/npm/v/dsh-pstack-deck?style=flat-square&color=8A9A8C)
 ![技能](https://img.shields.io/badge/技能-58_个-D7B9C8?style=flat-square)
 ![中文正文](https://img.shields.io/badge/中文正文-58_篇-9AA8C4?style=flat-square)
-![测试](https://img.shields.io/badge/测试-46_通过-C9A97A?style=flat-square)
+![测试](https://img.shields.io/badge/测试-60_通过-C9A97A?style=flat-square)
 ![许可](https://img.shields.io/badge/许可-MIT-8A9A8C?style=flat-square)
 
 - 插件名：`dsh-pstack-deck`
@@ -45,6 +45,10 @@
 **点节点下钻** —— 状态、认领人、动哪些路径、等谁、下一步技能与理由、可直接粘的命令。
 
 ![下钻](docs/preview-drill.png)
+
+**收尾必须写结论** —— 点「完成」不是改个状态，而是先回答「做成了什么、验过什么」；空着点确认会被拦住。写完这句话会同时进卡的 `## 结论` 和地图的「已经定了」。
+
+![收尾](docs/preview-finish.png)
 
 **真宿主** —— 起一个真 DSH 实例、真浏览器点开的右栏，不是渲染稿：打开就是看板，项目名与板路径在顶上。
 
@@ -252,7 +256,7 @@ agent 自己也能用：
 | `pstack_use` | 取一个技能的正文，当作这次任务的操作说明（有中文就用中文） |
 | `pstack_suggest` | 给 3~5 条带现成提示词的建议 |
 | `pstack_init` | 初始化一个项目的板：地图卡 + `.pstack/README.md` + `AGENTS.md` 里的看板段 |
-| `pstack_board` | 看板：`list / add / move / claim / release / next` |
+| `pstack_board` | 看板：`list / add / move / claim / release / done / drop / reopen / next` |
 | `pstack_install` | 把技能装进某个项目的 `.dsh/skills`，让那个项目新开的会话也能用 |
 
 ### 4. 建议与流程图
@@ -287,8 +291,46 @@ verify: node --test 全绿  # 做完的证据
 ---
 正文……
 
+## 结论
+
+加了 cookie 重试，Safari 复测通过
+
 - 2026-11-23 [在做] 抓到请求头里少了 cookie
+- 2026-11-23 [完成] 加了 cookie 重试，Safari 复测通过
 ```
+
+### 闭环：一张卡要么做成，要么放掉，都要留下结论
+
+这是这套东西的**唯一规矩**，也是它能不能自己滚起来的关键：
+
+```
+add ──▶ claim ──▶ 干活 ──┬─▶ done     （必须写：做成了什么、验过什么）
+  ▲                      └─▶ drop     （必须写：为什么放掉）
+  │                        │
+  └────── reopen ◀─────────┘  编号不变，结论留着
+```
+
+为什么不是「改个状态就完事」：
+
+- `state: done` 而没有结论，三天后没人知道当时改了什么、验没验 —— 等于没做。
+- `state: dropped` 而没有原因，下一个人会把同一条死路再走一遍。
+- 结束之后卡不是删掉：`op: "reopen"` 回到待办，**结论是累加的**，之前为什么放弃还看得见。
+
+所以结束是一次**动作**，不是一次字段编辑：
+
+| 入口 | 行为 |
+|---|---|
+| 面板「完成 / 废弃」 | 先弹出结论输入框，空着点确认会被拦住 |
+| `pstack_board op: "done" / "drop"` | `note` 必填，缺了直接报错 |
+| `op: "move" state: done` | 被拒绝，并告诉你该走 `op: "done"` |
+
+写完会发生三件事，一次原子地发生：
+
+1. 卡的 `## 结论` 段落下这句话，末尾追加一条进展；
+2. 认领人清空 —— 别人一看就知道不用再等这个会话；
+3. **地图跟着动**：完成写进「已经定了」，废弃写进「不做什么」。这块板的记忆不会断在地图之外。
+
+面板每 4 秒自己对一次盘：agent 在会话里把卡收尾了，你这边不用点刷新，分组和「建议接下来做这几件」会一起变。点按钮时也是同一帧刷新 —— 不会出现卡进了「完成」而推荐还停在上一条。
 
 ### 跟着项目走：先找到项目根，再谈板
 
@@ -411,7 +453,9 @@ npm publish --registry=https://registry.npmjs.org --access public
 ## 已知边界
 
 - `scope` 冲突是**路径前缀比对**，不是代码级依赖分析。同目录不同文件互依的情况挡不住。
-- WIP 上限没有硬拦：认领第二张 `doing` 不会被拒绝，只是分组里看得见。
+- WIP 上限没有硬拦：认领第二张 `doing` 不会拒绝，只会提醒「你手上还有 #N」。硬拦会挡住「一张卡拆成两半同时推进」的合理情况。
+- 卡进入 `done` / `dropped` 之后不会自动归档到别的文件，全躺在同一个 `.pstack/board/`；卡多了之后目录会长，暂时靠编号和分组读。
+- 「收尾必须写结论」只在工具和面板上拦。手改 `.pstack/board/*.md` 把 `state: done` 写上去，是拦不住的 —— markdown 是真相，这是它的代价。
 - 地图「还没想清」的雾**不会自动毕业**成新卡，要人点一下。
 - 预期线路只画一步（推荐 → 完成），不画「完成之后接哪张」。
 - 中文正文是逐篇人工对齐翻译，上游改版后需要重跑 `npm run check:zh` 才发现漂移。

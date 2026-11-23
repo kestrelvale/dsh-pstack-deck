@@ -12,11 +12,14 @@ import {
   blockersOf,
   conflictsOf,
   KINDS,
+  claimCard,
+  finishCard,
   kindZh,
   loadBoard,
   mapOf,
   nextOf,
   recommend,
+  reopenCard,
   saveCard,
   stateZh,
   STATES,
@@ -171,22 +174,54 @@ async function boardTool(args, exec, ctx) {
     })
     return `已记入看板：#${card.id} ${card.title}（${kindZh(card.kind)} · ${stateZh(card.state)}）\n${dir}`
   }
+  if (op === 'done' || op === 'drop') {
+    const id = Number(args?.id)
+    if (!Number.isInteger(id) || id <= 0) throw new Error('要给卡号 id')
+    const card = await finishCard(dir, id, { state: op === 'done' ? 'done' : 'dropped', note: String(args?.note ?? '') })
+    const map = mapOf((await loadBoard(dir)).cards)
+    return [
+      `#${card.id} ${card.title} → ${stateZh(card.state)}`,
+      `结论已写进卡里${map ? `，也记到地图 #${map.id} 的「${op === 'done' ? '已经定了' : '不做什么'}」` : ''}。`,
+      '下一张：op=list 看现在的可开工。',
+    ].join('\n')
+  }
+  if (op === 'reopen') {
+    const id = Number(args?.id)
+    if (!Number.isInteger(id) || id <= 0) throw new Error('要给卡号 id')
+    const card = await reopenCard(dir, id, { note: String(args?.note ?? '') })
+    return `#${card.id} ${card.title} 已重开（${stateZh(card.state)}），可以再认领。`
+  }
   if (op === 'move') {
     const id = Number(args?.id)
     if (!Number.isInteger(id) || id <= 0) throw new Error('要给卡号 id')
-    const card = await addProgress(dir, id, String(args?.note ?? ''), STATES.includes(args?.state) ? args.state : undefined)
-    return `#${card.id} ${card.title} → ${stateZh(card.state)}\n${card.body.trim().split('\n').slice(-1)[0] ?? ''}`
+    const want = String(args?.state ?? '').trim()
+    if (want === 'done' || want === 'dropped') {
+      throw new Error(`结束要走 op=${want === 'done' ? 'done' : 'drop'} 并给一句 note——没有结论的「结束」等于没做`)
+    }
+    if (!STATES.includes(want)) throw new Error('move 要 state=todo 或 doing（结束用 done / drop）')
+    const card = await addProgress(dir, id, String(args?.note ?? ''), want)
+    return `#${card.id} ${card.title} → ${stateZh(card.state)}`
   }
-  if (op === 'claim' || op === 'release') {
+  if (op === 'claim') {
     const id = Number(args?.id)
     if (!Number.isInteger(id) || id <= 0) throw new Error('要给卡号 id')
-    const owner = op === 'claim' ? String(args?.owner ?? exec?.sessionId ?? 'me').trim() : ''
-    const card = await saveCard(dir, { id, owner })
-    return op === 'claim'
-      ? `#${card.id} ${card.title} 归你了（认领人 ${owner}）。做完记得 op=move state=done，并把跑过的验证写进 note。`
-      : `#${card.id} ${card.title} 已交回待领（没人做）。`
+    const owner = String(args?.owner ?? exec?.sessionId ?? 'me').trim()
+    const scope = Array.isArray(args?.scope) ? args.scope : []
+    const card = await claimCard(dir, id, { owner, scope })
+    const doing = (await loadBoard(dir)).cards.filter((c) => c.owner && c.owner === owner && c.state === 'doing' && c.id !== card.id)
+    return [
+      `#${card.id} ${card.title} 归你了（${owner} → 在做）。`,
+      doing.length ? `提醒：你手上还有 ${doing.map((c) => '#' + c.id).join('、')} 没结束。一张做完再开下一张，不然两边都半截。` : '',
+      `收尾一定要调 op=done 或 op=drop，note 里写一句结论——不写的话这张卡会一直挂在「在做」，看板就停在那了。`,
+    ].filter(Boolean).join('\n')
   }
-  if (op !== 'list' && op !== 'next') throw new Error('op 只能是 list / add / move / claim / release / next')
+  if (op === 'release') {
+    const id = Number(args?.id)
+    if (!Number.isInteger(id) || id <= 0) throw new Error('要给卡号 id')
+    const card = await saveCard(dir, { id, owner: '' })
+    return `#${card.id} ${card.title} 已交回待领（没人做）。`
+  }
+  if (op !== 'list' && op !== 'next') throw new Error('op 只能是 list / add / move / claim / release / done / drop / reopen / next')
 
   const board = await loadBoard(dir)
   const cards = board.cards.map((c) => ({ ...c, next: recommend(c, board.cards), blocked: blockersOf(c, board.cards) }))
@@ -288,18 +323,24 @@ export function apply(ctx) {  const tools = ctx?.tools
   tools.register({
     name: 'pstack_board',
     description:
-      '项目看板（存在 <项目>/.pstack/board/ 的 markdown 卡里）。op=list 看板与下一步建议；'
-      + 'op=add 记一张想法/缺陷/任务；op=move 改状态或写一条进展；op=next 只要下一步。',
+      '项目看板（存在 <项目>/.pstack/board/ 的 markdown 卡里）。一张卡的生命周期只有一条路：'
+      + 'add 建 → claim 认领（变 doing）→ 干活 → done 或 drop 收尾（必须带一句结论）。'
+      + '认领之后一定要走到 done/drop，否则这张卡会一直挂在「在做」，整个看板就停在那儿——'
+      + '这就是闭环。结束了想再干就 reopen。op=list 看全景，op=next 只要下一步。',
     parameters: {
       type: 'object',
       properties: {
-        op: { type: 'string', enum: ['list', 'add', 'move', 'claim', 'release', 'next'], description: 'list / add / move / claim / release / next' },
+        op: {
+          type: 'string',
+          enum: ['list', 'add', 'move', 'claim', 'release', 'done', 'drop', 'reopen', 'next'],
+          description: 'list 看板 / add 建卡 / claim 认领 / move 改 todo|doing / done 做完 / drop 废弃 / reopen 重开 / release 交回 / next 下一步',
+        },
         title: { type: 'string', description: 'add 时必给：这张卡要干什么' },
         body: { type: 'string', description: 'add 时的详细说明（markdown）' },
         kind: { type: 'string', enum: ['idea', 'bug', 'task', 'map'], description: 'add 时给：想法 / 缺陷 / 任务 / 地图（一块板一张，写清去向）' },
         id: { type: 'number', description: 'move 时必给：卡号' },
         state: { type: 'string', enum: ['idea', 'todo', 'doing', 'done', 'dropped'], description: 'move 时给：新状态' },
-        note: { type: 'string', description: 'move 时的进展说明' },
+        note: { type: 'string', description: 'move 时的进展说明；done/drop 时必给：这次做成了什么、验过什么，或为什么不做了' },
         after: { type: 'array', items: { type: 'number' }, description: 'add 时给：要等哪几张卡先做完（卡号）' },
         parent: { type: 'number', description: 'add 时给：挂在哪张卡下面（通常是地图的卡号）' },
         scope: { type: 'array', items: { type: 'string' }, description: 'add 时给：这张卡能动哪些路径，用来判断并行会不会打架' },

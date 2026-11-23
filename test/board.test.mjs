@@ -154,3 +154,18 @@ test('地图：四段正文切得出来，缺的就是空串', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('下一步不会把地图当成活：全做完了就该说什么都没有', async () => {
+  const dir = await tmp()
+  try {
+    const map = await saveCard(dir, { kind: 'map', title: '这次要去哪' })
+    const card = await saveCard(dir, { kind: 'task', title: '把导出改成流式的' })
+    assert.equal(nextOf((await loadBoard(dir)).cards).card.id, card.id, '有活的时候推活，不推地图')
+    await addProgress(dir, card.id, '做完了', 'done')
+    const board = await loadBoard(dir)
+    assert.equal(mapOf(board.cards).id, map.id, '地图还在')
+    assert.equal(nextOf(board.cards), null, '活全做完了就是没有下一步')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

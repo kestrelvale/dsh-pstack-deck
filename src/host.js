@@ -13,6 +13,10 @@ import { readFile } from 'node:fs/promises'
 
 import {
   addProgress,
+  answerOf,
+  claimCard,
+  finishCard,
+  reopenCard,
   blockersOf,
   childrenOf,
   conflictsOf,
@@ -164,6 +168,9 @@ const methods = {
     if (!Number.isInteger(id) || id <= 0) return { ok: false, error: { code: 'bad-id', message: '卡号不对' } }
     const note = String(payload?.note ?? '').trim()
     const state = payload?.state
+    if (state === 'done' || state === 'dropped') {
+      return { ok: false, error: { code: 'need-answer', message: '结束要走「完成 / 废弃」，并且写一句结论' } }
+    }
     if (!note && !state) return { ok: false, error: { code: 'no-change', message: '要么改状态，要么写一句进展' } }
     try {
       await addProgress(cwd, id, note || `→ ${stateZh(state)}`, state)
@@ -171,6 +178,35 @@ const methods = {
       return { ok: false, error: { code: 'no-card', message: String(e?.message ?? e) } }
     }
     return { ok: true, value: await view(await loadBoard(cwd), resolveWorkspace(ctx, payload?.sessionId)) }
+  },
+
+  /**
+   * 闭环的四个动作，全都返回刷新后的整块板：
+   * claim 认领、finish 收尾（done/drop，必须带结论）、reopen 重开、release 交回。
+   * 面板点一下就走这里，所以状态和各处建议是同一帧刷新的，不会各说各话。
+   */
+  async boardAct(payload, ctx) {
+    const cwd = workspaceOf(ctx, payload?.sessionId)
+    const id = Number(payload?.id)
+    if (!Number.isInteger(id) || id <= 0) return { ok: false, error: { code: 'bad-id', message: '卡号不对' } }
+    const action = String(payload?.action ?? '').trim()
+    const note = String(payload?.note ?? '').trim()
+    let touched
+    try {
+      if (action === 'claim') touched = await claimCard(cwd, id, { owner: String(payload?.owner ?? 'me'), scope: Array.isArray(payload?.scope) ? payload.scope : [] })
+      else if (action === 'done') touched = await finishCard(cwd, id, { state: 'done', note })
+      else if (action === 'drop') touched = await finishCard(cwd, id, { state: 'dropped', note })
+      else if (action === 'reopen') touched = await reopenCard(cwd, id, { note })
+      else if (action === 'release') touched = await saveCard(cwd, { id, owner: '' })
+      else return { ok: false, error: { code: 'bad-action', message: `不认识的 action：${action}` } }
+    } catch (e) {
+      return { ok: false, error: { code: 'rejected', message: String(e?.message ?? e) } }
+    }
+    const nextBoard = await loadBoard(cwd)
+    return {
+      ok: true,
+      value: { ...(await view(nextBoard, resolveWorkspace(ctx, payload?.sessionId))), touched: { id: touched.id, state: touched.state } },
+    }
   },
 }
 
@@ -180,6 +216,7 @@ async function view(board, ws) {
   const cards = board.cards.map((c) => ({
     ...c,
     next: recommend(c, board.cards),
+    answer: answerOf(c),
     blocked: blockersOf(c, board.cards),
     children: childrenOf(board.cards, c.id).length,
   }))

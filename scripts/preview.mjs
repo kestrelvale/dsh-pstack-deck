@@ -207,7 +207,7 @@ await new Promise((r) => setTimeout(r, 300))
 
 // 可选第二参数：`board` 切到看板；其他值当成技能名点开详情
 const openName = process.argv[3]
-if (openName === 'board' || openName === 'flow' || openName === 'drill' || openName === 'init') {
+if (openName === 'board' || openName === 'flow' || openName === 'drill' || openName === 'init' || openName === 'finish') {
   const tree = React.createElement(Panel, { sessionId: 'preview' })
   const walk = (node, label = '看板') => {
     if (!node || typeof node !== 'object') return false
@@ -217,6 +217,7 @@ if (openName === 'board' || openName === 'flow' || openName === 'drill' || openN
     // 文本可能包在子节点里（SVG 的 <text> 就是），所以除了直接相等也认「子树里有这句话」
     const flat = (n) => (Array.isArray(n) ? n.map(flat).join('') : typeof n === 'string' ? n : n && n.children ? flat(n.children) : '')
     if (node.props && typeof node.props.onClick === 'function' && (kids.includes(label) || flat(kids).includes(label))) {
+      if (process.env.PSP_DEBUG) console.error('[walk] click', label, 'on', flat(kids).slice(0, 40), '|', String(node.props.onClick).replace(/\s+/g, ' ').slice(0, 140))
       node.props.onClick()
       return true
     }
@@ -226,6 +227,11 @@ if (openName === 'board' || openName === 'flow' || openName === 'drill' || openN
   await new Promise((r) => setTimeout(r, 300))
   if (openName === 'flow' || openName === 'drill') {
     walk(React.createElement(Panel, { sessionId: 'preview' }), '流程')
+    await new Promise((r) => setTimeout(r, 200))
+  }
+  if (openName === 'finish') {
+    // 点第一张卡的「完成」，看收尾编辑器长什么样：结论是必填的
+    walk(React.createElement(Panel, { sessionId: 'preview' }), '完成')
     await new Promise((r) => setTimeout(r, 200))
   }
   if (openName === 'drill') {
@@ -243,6 +249,7 @@ if (openName === 'list') {
     const kids = node.children || []
     const flat = (n) => (Array.isArray(n) ? n.map(flat).join('') : typeof n === 'string' ? n : n && n.children ? flat(n.children) : '')
     if (node.props && typeof node.props.onClick === 'function' && (kids.includes(label) || flat(kids).includes(label))) {
+      if (process.env.PSP_DEBUG) console.error('[walk] click', label, 'on', flat(kids).slice(0, 40), '|', String(node.props.onClick).replace(/\s+/g, ' ').slice(0, 140))
       node.props.onClick()
       return true
     }
@@ -251,7 +258,7 @@ if (openName === 'list') {
   walk(tree, '全部技能')
   await new Promise((r) => setTimeout(r, 300))
 }
-if (openName && !['board', 'flow', 'drill', 'init', 'list'].includes(openName)) {
+if (openName && !['board', 'flow', 'drill', 'init', 'list', 'finish'].includes(openName)) {
   const toSkills = (node) => {
     if (!node || typeof node !== 'object') return false
     if (Array.isArray(node)) return node.some(toSkills)

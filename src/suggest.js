@@ -111,8 +111,17 @@ function choiceOf(card, cards, project) {
     certainty,
     factors: noulFactors(card),
     ask: false,
-    prompt: `/${next.skill} #${card.id} ${scope}`,
+    prompt: withLoop(`/${next.skill} #${card.id} ${scope}`, card.id),
   }
+}
+
+/**
+ * 注入的命令不只是命令，还捎带一句收尾契约。
+ * 没有这句，agent 干完活不会回写看板——「执行完状态不动」就是这么来的。
+ */
+export function withLoop(cmd, cardId) {
+  return `${cmd}\n\n（pstack 看板约定：#${cardId} 现在是「在做」。干完调 pstack_board op=done id=${cardId} note="做成什么、验过什么"；`
+    + `干不下去调 op=drop id=${cardId} note="为什么放掉"。不要让它停在「在做」。）`
 }
 
 // ------------------------------------------------------------------ 层选择
@@ -227,7 +236,7 @@ export function directionOf(board, project) {
     urgency: top.urgency,
     certainty: noulClear(head),
     ask: false,
-    prompt: `/${next.skill} #${head.id} ${scope}`,
+    prompt: withLoop(`/${next.skill} #${head.id} ${scope}`, head.id),
   }
 }
 

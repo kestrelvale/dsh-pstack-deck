@@ -172,7 +172,8 @@ export function recommend(card, cards = []) {
 
 /** 看板的下一步：第一条在做，否则第一条待办/想法。 */
 export function nextOf(cards) {
-  const open = cards.filter((c) => c.state !== 'done' && c.state !== 'dropped')
+  // 地图是上下文不是活：没有别的卡时不能把它当成「下一步」
+  const open = cards.filter((c) => isOpen(c) && c.kind !== 'map')
   const pick = open.find((c) => c.state === 'doing') ?? open.find((c) => c.state === 'todo') ?? open[0]
   if (!pick) return null
   return { card: pick, ...recommend(pick, cards) }
@@ -309,4 +310,125 @@ export function mapSections(card) {
 /** 地图下面挂着的卡。 */
 export function childrenOf(cards, id) {
   return cards.filter((c) => c.parent === Number(id))
+}
+
+// ---------------------------------------------------------------- 闭环
+//
+// 教训来自一次真实的失败：注入一条命令、agent 干完活，卡还停在「在做」。
+// 原因不是哪个按钮坏了，而是「结束」这件事没有闸门——它可以不写任何结论
+// 就发生，也可以根本不发生。所以这里把结束变成一次显式的动作：
+//   只有 done / dropped 算结束，而且必须留下一句结论。
+// 结论文本会被复制进地图的「已经定了」，这块板的记忆才不会断。
+
+export const ANSWER_HEAD = '## 结论'
+
+/** 卡里「## 结论」段的内容；没有就是空串。 */
+export function answerOf(card) {
+  const body = String(card?.body ?? '')
+  const m = body.match(/^##\s*结论\s*$/m)
+  if (!m) return ''
+  const after = body.slice(m.index + m[0].length)
+  const next = after.search(/^##\s/m)
+  const text = next === -1 ? after : after.slice(0, next)
+  // 进展行也是追加在文末的，会落进这一段；它们不是结论本身
+  return text.split('\n').filter((l) => !/^- \d{4}-\d{2}-\d{2} \[/.test(l)).join('\n').trim()
+}
+
+/** 往地图某一段末尾追加一行；这一段不存在就在文末补出来。 */
+export function appendToSection(body, label, line) {
+  const lines = String(body ?? '').split('\n')
+  const at = lines.findIndex((l) => l.trim() === '## ' + label)
+  if (at === -1) return [...lines, '', '## ' + label, '', line].join('\n').trimEnd()
+  let end = lines.length
+  for (let i = at + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) {
+      end = i
+      break
+    }
+  }
+  let last = at
+  for (let i = at + 1; i < end; i++) if (lines[i].trim()) last = i
+  if (last === at) return [...lines.slice(0, at + 1), '', line, ...lines.slice(at + 1)].join('\n')
+  return [...lines.slice(0, last + 1), line, ...lines.slice(last + 1)].join('\n')
+}
+
+/**
+ * 结束一张卡：done（做成了）或 dropped（放掉了）。两者都必须带一句结论。
+ * 完成 → 地图「已经定了」记一笔；废弃 → 地图「不做什么」记一笔。
+ */
+export async function finishCard(cwd, id, { state = 'done', note = '' } = {}) {
+  const target = String(state)
+  if (target !== 'done' && target !== 'dropped') {
+    throw new Error(`结束只能是 done 或 dropped，收到的是 ${target}`)
+  }
+  const text = String(note ?? '').trim()
+  if (!text) {
+    throw new Error(target === 'done'
+      ? '完成要写一句结论：这次到底做成了什么、验过没有（会写进卡里的「## 结论」）'
+      : '废弃要写一句原因：为什么不做了（会写进卡里的「## 结论」）')
+  }
+  const board = await loadBoard(cwd)
+  const card = board.cards.find((c) => c.id === Number(id))
+  if (!card) throw new Error(`看板里没有第 ${id} 号卡`)
+  if (card.kind === 'map') throw new Error('地图不是活：改它的四段就好，别把它标成完成')
+  if (card.state === target) throw new Error(`#${card.id} 已经是${stateZh(target)}了`)
+
+  let body = String(card.body ?? '').trimEnd()
+  body = answerOf(card)
+    ? `${body}\n- ${text}\n`
+    : `${body}\n\n${ANSWER_HEAD}\n\n${text}\n`
+
+  // 先改卡：状态、认领人清空、结论落盘、进展留痕
+  const saved = await saveCard(cwd, { id: card.id, title: card.title, state: target, owner: '' })
+  await saveCard(cwd, { id: saved.id, title: saved.title, body })
+  const withAnswer = await addProgress(cwd, card.id, text, target)
+
+  // 再把这一笔写回地图：换了别人接手，翻地图就知道当时定了什么
+  const map = (card.parent && board.cards.find((c) => c.id === card.parent)) || mapOf(board.cards)
+  if (map && map.id !== card.id) {
+    const line = target === 'done'
+      ? `- #${card.id} ${card.title} —— ${text}`
+      : `- #${card.id} ${card.title} —— 放掉了：${text}`
+    await saveCard(cwd, {
+      id: map.id,
+      title: map.title,
+      body: appendToSection(map.body, target === 'done' ? '已经定了' : '不做什么', line),
+    })
+  }
+  return withAnswer
+}
+
+/**
+ * 重开一张已结束的卡：回到待办，认领人清空。
+ * 废弃不等于删除——当时想的路走不通，换个做法还能接着用同一个编号。
+ */
+export async function reopenCard(cwd, id, { note = '' } = {}) {
+  const board = await loadBoard(cwd)
+  const card = board.cards.find((c) => c.id === Number(id))
+  if (!card) throw new Error(`看板里没有第 ${id} 号卡`)
+  if (card.kind === 'map') throw new Error(`#${card.id} 是地图，不用重开`)
+  if (isOpen(card)) throw new Error(`#${card.id} 还没结束（${stateZh(card.state)}），不用重开`)
+  const why = String(note ?? '').trim()
+  const reopened = await saveCard(cwd, { id: card.id, title: card.title, state: 'todo', owner: '' })
+  return addProgress(cwd, reopened.id, why ? `重开：${why}` : '重开', 'todo')
+}
+
+/** 认领：先改状态再动手，别人扫一眼就知道这张有人在弄。 */
+export async function claimCard(cwd, id, { owner = 'me', scope = [] } = {}) {
+  const board = await loadBoard(cwd)
+  const card = board.cards.find((c) => c.id === Number(id))
+  if (!card) throw new Error(`看板里没有第 ${id} 号卡`)
+  if (card.kind === 'map') throw new Error(`#${card.id} 是地图，不是活`)
+  if (!isOpen(card)) throw new Error(`#${card.id} 已经结束了，先 reopen 再认领`)
+  const blockers = blockersOf(card, board.cards)
+  if (blockers.length) throw new Error(`#${card.id} 还被挡着：等 ${blockers.map((n) => '#' + n).join('、')} 做完`)
+  if (card.owner && card.owner !== owner) throw new Error(`#${card.id} 已经被 ${card.owner} 认领了`)
+  const saved = await saveCard(cwd, {
+    id: card.id,
+    title: card.title,
+    state: 'doing',
+    owner,
+    scope: scope.length ? scope : card.scope,
+  })
+  return addProgress(cwd, saved.id, `认领：${owner}`, 'doing')
 }

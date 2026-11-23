@@ -308,7 +308,7 @@ test('看板：流程图视图画出节点与箭头，废弃的单独标出', as
       dir: '/proj/.pstack/board',
       next: null,
       cards: [
-        { id: 1, kind: 'task', state: 'doing', title: '先把 session 换掉', body: '', progress: 0, after: [], next: { skill: 'tdd', why: '先写个会失败的测试' } },
+        { id: 1, kind: 'task', state: 'doing', owner: 'me', title: '先把 session 换掉', body: '', progress: 0, after: [], next: { skill: 'tdd', why: '先写个会失败的测试' } },
         { id: 2, kind: 'task', state: 'todo', title: '再加刷新', body: '', progress: 0, after: [1], blocked: [1], next: null },
         { id: 3, kind: 'idea', state: 'dropped', title: '顺手做移动端', body: '', progress: 0, after: [1], next: null },
       ],
@@ -391,4 +391,83 @@ test('看板：地图、冲突横幅、可开工与认领按钮都在', async ()
   assert.match(text, /被挡着/)
   assert.match(text, /我来做/)
   assert.match(text, /交回/)
+})
+
+// 闭环的面板侧：点「完成」必须先写一句结论，写完卡片和推荐一起刷新。
+// 这两条对着用户报的两个现象：「状态不往回写」「推荐不重新推荐」。
+test('看板：完成要先写结论；写完卡片落进完成组，建议跟着重算', async () => {
+  const calls = []
+  const mkBoard = (state, answer) => ({
+    ok: true,
+    value: {
+      cwd: '/proj',
+      dir: '/proj/.pstack/board',
+      next: null,
+      frontier: state === 'doing' ? [] : [1],
+      cards: [{
+        id: 1, kind: 'bug', state, owner: state === 'doing' ? 'me' : undefined,
+        title: '登录后偶发 401', body: '', progress: 1, after: [],
+        answer,
+        next: state === 'doing' ? { skill: 'correct', why: '把这次修复变成一条规则' } : null,
+        blocked: [],
+      }],
+      graph: { nodes: [{ id: 1, title: '登录后偶发 401', kind: 'bug', state, depth: 0 }], edges: [], lines: [], depthMax: 0 },
+      conflicts: { pairs: [], unscoped: [] },
+      map: null,
+    },
+  })
+  let finished = false
+  const rpc = (method, payload) => {
+    calls.push([method, payload])
+    if (method === 'boardAct') {
+      finished = payload.action === 'done'
+      return mkBoard('done', payload.note)
+    }
+    if (method === 'board') return finished ? mkBoard('done', '加了 cookie 重试') : mkBoard('doing')
+    if (method === 'suggest') return { ok: true, value: { layer: 'project', items: finished ? [] : [{ cardId: 1, skill: 'correct', title: '登录后偶发 401', why: 'x', urgency: 0.9, certainty: 0.9, prompt: '/correct #1 登录后偶发 401' }], scanned: 1 } }
+    return catalogOk
+  }
+  const { got } = boot(rpc)
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  Pane({ sessionId: 's20' })
+  await tick()
+
+  assert.equal(clickByText(Pane({ sessionId: 's20' }), '完成'), true, '在做的卡要能点完成')
+  assert.match(textOf(Pane({ sessionId: 's20' })), /做成了什么、验过什么/, '要给写结论的地方')
+
+  // 空结论点确认：不许落盘，只提示
+  const before = calls.filter(([m]) => m === 'boardAct').length
+  clickByText(Pane({ sessionId: 's20' }), '确认完成')
+  assert.equal(calls.filter(([m]) => m === 'boardAct').length, before, '没写结论不能提交')
+  assert.match(textOf(Pane({ sessionId: 's20' })), /写一句做成了什么/)
+
+  // 写一句结论再确认
+  const findTextarea = (node) => {
+    if (!node || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (const n of node) {
+        const hit = findTextarea(n)
+        if (hit) return hit
+      }
+      return null
+    }
+    if (typeof node.type === 'function') return findTextarea(node.type(node.props))
+    if (node.type === 'textarea') return node
+    return node.children ? findTextarea(node.children) : null
+  }
+  const ta = findTextarea(Pane({ sessionId: 's20' }))
+  assert.ok(ta, '要有输入框')
+  ta.props.onChange({ target: { value: '加了 cookie 重试，Safari 复测通过' } })
+  clickByText(Pane({ sessionId: 's20' }), '确认完成')
+  await tick()
+
+  const acts = calls.filter(([m]) => m === 'boardAct')
+  assert.equal(acts.length, 1)
+  assert.deepEqual(acts[0][1].action, 'done')
+  assert.match(acts[0][1].note, /Safari 复测通过/)
+  assert.ok(calls.filter(([m]) => m === 'suggest').length >= 2, '动作之后要重新算建议')
+
+  const text = textOf(Pane({ sessionId: 's20' }))
+  assert.match(text, /完成 · 1/, '卡片要真的落进完成组')
+  assert.match(text, /重开/, '结束的卡要给重开入口——废弃不是删掉')
 })
