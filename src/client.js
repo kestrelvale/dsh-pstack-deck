@@ -44,7 +44,7 @@ window.__ModuleLoader__.load({
       zhOnly: false, // 有中文正文时默认显示中文，点一下切回原文
       sugOpen: '', // 展开了哪条建议（看 Jev 分数和命令）
       node: null, // 流程图里下钻的卡号
-      view: 'skills', // skills | board
+      view: 'board', // board | skills —— 默认看板：进来先看到「这个项目要干什么」，而不是 58 个技能名
       sid: '', // 会话号：看板要用它换出这个会话的项目目录
       board: null,
       sug: null, // 三层决策给出的 3~5 条建议
@@ -481,11 +481,42 @@ window.__ModuleLoader__.load({
         ])
         : null
 
+      // 看板页自带一份技能清单：只列上面建议里点得到的几个，剩下的收进「全部技能」
+      const cat = store.catalog || { skills: [] }
+      const bySkill = new Map((cat.skills || []).map((sk) => [sk.name, sk]))
+      const picked = [...new Set(((store.sug && store.sug.items) || []).map((it) => it.skill).filter(Boolean))].slice(0, 6)
+      const skillList = picked.length
+        ? h('div', { key: 'skills', style: { marginBottom: 12 } }, [
+          h('div', { key: 'h', style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 } }, [
+            h('span', { key: 't', style: { ...s.faint, fontSize: 11 } }, '这几件事要用的技能'),
+            h('div', { key: 'sp', style: { flex: 1 } }),
+            h('button', {
+              key: 'all',
+              style: { ...s.chip(false), fontSize: 10 },
+              onClick: () => set({ view: 'skills' }),
+            }, `全部 ${(cat.skills || []).length || ''} 个 →`),
+          ]),
+          ...picked.map((name) => {
+            const sk = bySkill.get(name)
+            return h('div', {
+              key: name,
+              style: { ...s.card(false), cursor: 'default', display: 'flex', gap: 8, alignItems: 'center', padding: '6px 8px' },
+            }, [
+              h('span', { key: 'n', style: { fontFamily: C.mono, fontSize: 11.5, color: C.accent, flex: 'none' } }, '/' + name),
+              h('span', { key: 'z', style: { color: C.dim, fontSize: 11.5, flex: 1, minWidth: 0, wordBreak: 'break-word' } },
+                (sk && (sk.zh || sk.description)) || ''),
+              h('button', { key: 'u', style: { ...s.btn(), padding: '2px 8px', fontSize: 11, flex: 'none' }, onClick: () => inject('/' + name + ' ') }, '用这个'),
+            ])
+          }),
+        ])
+        : null
+
       return h('div', { style: s.body }, [
         h('div', { key: 'proj', style: { ...s.faint, fontSize: 10, marginBottom: 8, wordBreak: 'break-all' } },
           `📁 ${proj ? proj.name : ''} · ${b.root || b.cwd}${proj && proj.rel ? `（当前是它的子目录：${proj.rel}）` : ''}`),
         initCard,
         h(Suggest, { key: 'sug' }),
+        skillList,
 
         h('div', { key: 'add', style: { display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap' } }, [
           h('input', {
@@ -731,6 +762,10 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (props && props.sessionId && props.sessionId !== store.sid) set({ sid: props.sessionId })
       }, [props && props.sessionId])
+      // 默认就站在看板上，所以不用等谁点一下才去读
+      React.useEffect(() => {
+        if (store.view === 'board' && !store.board) loadBoard()
+      }, [store.view, store.sid])
       const toBoard = () => {
         set({ view: 'board' })
         if (!store.board) loadBoard()
@@ -740,10 +775,9 @@ window.__ModuleLoader__.load({
       const head = h('div', { key: 'head', style: s.head }, [
         h('span', { key: 't', style: { fontWeight: 650 } }, 'pstack'),
         cat ? h('span', { key: 'v', style: { ...s.faint, fontFamily: C.mono } }, 'v' + cat.version) : null,
-        cat ? h('span', { key: 'n', style: s.faint }, `${cat.skills.length} 个技能`) : null,
         h('div', { key: 'sp', style: { flex: 1 } }),
-        h('button', { key: 'vs', style: { ...s.chip(store.view === 'skills'), fontSize: 11 }, onClick: () => set({ view: 'skills' }) }, '技能'),
         h('button', { key: 'vb', style: { ...s.chip(store.view === 'board'), fontSize: 11 }, onClick: toBoard }, '看板'),
+        h('button', { key: 'vs', style: { ...s.chip(store.view === 'skills'), fontSize: 11 }, onClick: () => set({ view: 'skills' }) }, '全部技能'),
         store.upd && !store.upd.error
           ? h('span', {
             key: 'pv',
@@ -751,11 +785,11 @@ window.__ModuleLoader__.load({
               ? `插件有新版本 ${store.upd.latest}（当前 ${store.upd.current}）`
               : `插件 ${store.upd.current || ''} 是最新的`,
             style: {
-              ...s.faint, fontFamily: C.mono, fontSize: 11, cursor: 'pointer',
+              ...s.faint, fontFamily: C.mono, fontSize: 11, cursor: 'pointer', whiteSpace: 'nowrap',
               color: store.upd.hasUpdate ? '#f0b132' : undefined,
             },
             onClick: () => checkUpd(true),
-          }, store.upd.hasUpdate ? `↑ ${store.upd.latest}` : `插件 ${store.upd.current || '?'}`)
+          }, store.upd.hasUpdate ? `↑ ${store.upd.latest}` : `${store.upd.current || '?'}`)
           : null,
         cat ? h('button', { key: 'r', style: { ...s.btn(), padding: '2px 6px', fontSize: 11 }, onClick: () => { load(true); if (store.board) loadBoard() }, title: '重新读一遍磁盘' }, '刷新') : null,
       ])

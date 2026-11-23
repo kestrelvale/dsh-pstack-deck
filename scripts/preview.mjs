@@ -165,7 +165,7 @@ const ctx = {
             }
             if (req && req.method === 'update') {
               // 演示「有新版本」长什么样：假装 npm 上多了一个 0.2.0
-              return Promise.resolve({ ok: true, value: { current: '0.1.0', latest: '0.2.0', hasUpdate: true, cached: false, error: '' } })
+              return Promise.resolve({ ok: true, value: { current: '0.4.0', latest: '0.4.0', hasUpdate: false, cached: false, error: '' } })
             }
             if (req && req.method === 'board') {
               // init 模式：演示「项目还没初始化」那张卡长什么样
@@ -234,7 +234,37 @@ if (openName === 'board' || openName === 'flow' || openName === 'drill' || openN
     await new Promise((r) => setTimeout(r, 200))
   }
 }
-if (openName && !['board', 'flow', 'drill', 'init'].includes(openName)) {
+if (openName === 'list') {
+  const tree = React.createElement(Panel, { sessionId: 'preview' })
+  const walk = (node, label) => {
+    if (!node || typeof node !== 'object') return false
+    if (Array.isArray(node)) return node.some((n) => walk(n, label))
+    if (typeof node.type === 'function') return walk(node.type(node.props), label)
+    const kids = node.children || []
+    const flat = (n) => (Array.isArray(n) ? n.map(flat).join('') : typeof n === 'string' ? n : n && n.children ? flat(n.children) : '')
+    if (node.props && typeof node.props.onClick === 'function' && (kids.includes(label) || flat(kids).includes(label))) {
+      node.props.onClick()
+      return true
+    }
+    return walk(kids, label)
+  }
+  walk(tree, '全部技能')
+  await new Promise((r) => setTimeout(r, 300))
+}
+if (openName && !['board', 'flow', 'drill', 'init', 'list'].includes(openName)) {
+  const toSkills = (node) => {
+    if (!node || typeof node !== 'object') return false
+    if (Array.isArray(node)) return node.some(toSkills)
+    if (typeof node.type === 'function') return toSkills(node.type(node.props))
+    const kids = node.children || []
+    if (node.props && typeof node.props.onClick === 'function' && JSON.stringify(kids).includes('全部技能')) {
+      node.props.onClick()
+      return true
+    }
+    return toSkills(kids)
+  }
+  toSkills(React.createElement(Panel, { sessionId: 'preview' }))
+  await new Promise((r) => setTimeout(r, 200))
   const seen = new Set()
   const click = (node) => {
     if (!node || typeof node !== 'object') return false

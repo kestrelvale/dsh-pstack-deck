@@ -135,8 +135,9 @@ test('面板半：apply 之后右栏有 tab + 标题 + tab 本体 + 输入框 do
 test('面板半：挂载 → 取目录 → 渲染引导与分组', async () => {
   const { got } = boot(() => catalogOk)
   const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
-  assert.match(textOf(Pane({ sessionId: 's1' })), /读目录/, '第一帧是加载态')
+  assert.match(textOf(Pane({ sessionId: 's1' })), /读看板/, '默认落在看板，第一帧是加载态')
   await tick()
+  assert.equal(clickByText(Pane({ sessionId: 's1' }), '全部技能'), true, '技能清单是二级入口')
   const text = textOf(Pane({ sessionId: 's1' }))
   assert.match(text, /v0\.15\.46/)
   assert.match(text, /先写一个会失败的测试/)
@@ -151,6 +152,7 @@ test('面板半：读不到目录时给人能照着做的一句话', async () =>
   const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
   Pane({ sessionId: 's2' })
   await tick()
+  clickByText(Pane({ sessionId: 's2' }), '全部技能')
   const text = textOf(Pane({ sessionId: 's2' }))
   assert.match(text, /读不到 pstack 目录/)
   assert.match(text, /宿主没响应/)
@@ -162,9 +164,50 @@ test('面板半：副本和仓库不一致时会催同步', async () => {
   const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
   Pane({ sessionId: 's3' })
   await tick()
+  clickByText(Pane({ sessionId: 's3' }), '全部技能')
   const text = textOf(Pane({ sessionId: 's3' }))
   assert.match(text, /和仓库不一致/)
   assert.match(text, /npm run sync/)
+})
+
+test('面板半：进来就站在看板上，不用先点技能页', async () => {
+  const board = {
+    ok: true,
+    value: {
+      cwd: '/proj', root: '/proj', dir: '/proj/.pstack/board',
+      project: { name: 'proj', initialized: true, missing: [], rel: '' },
+      cards: [{ id: 1, kind: 'task', state: 'todo', title: '给看板加列筛选', body: '', progress: 0, next: { skill: 'architect', why: '先画结构' } }],
+    },
+  }
+  const sug = {
+    ok: true,
+    value: {
+      layer: 'project',
+      items: [{ id: '#1', cardId: 1, project: '', title: '给看板加列筛选', skill: 'tdd', why: '先写测试', urgency: 0.9, certainty: 0.9, factors: {}, prompt: '/tdd #1 给看板加列筛选' }],
+    },
+  }
+  const seen = []
+  const { got } = boot((method) => {
+    seen.push(method)
+    if (method === 'suggest') return sug
+    return method === 'board' ? board : catalogOk
+  })
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  Pane({ sessionId: 's0' })
+  await tick()
+  // 一帧都不点，就该已经在看板上
+  assert.equal(seen.includes('board'), true, '默认视图要自己去看板取数')
+  const text = textOf(Pane({ sessionId: 's0' }))
+  assert.match(text, /📁 proj/, '要看出这是哪个项目')
+  assert.match(text, /建议接下来做这几件/, '看板页先给建议')
+  assert.match(text, /给看板加列筛选/)
+  assert.doesNotMatch(text, /不知道点哪个/, '引导语属于技能页，不该出现在看板上')
+  // 看板页自带技能清单：只列建议里点得到的，带中文一句话和「用这个」
+  assert.match(text, /这几件事要用的技能/)
+  assert.match(text, /\/tdd/)
+  assert.match(text, /先写一个会失败的测试/)
+  assert.equal(clickByText(Pane({ sessionId: 's0' }), '用这个'), true, '清单里的技能要能一键用')
+  assert.match(textOf(Pane({ sessionId: 's0' })), /\/tdd/, '点完草稿里是斜杠命令')
 })
 
 test('面板半：看板视图列出卡和下一步，按钮点得动', async () => {
