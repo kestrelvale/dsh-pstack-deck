@@ -46,6 +46,10 @@
 
 ![下钻](docs/preview-drill.png)
 
+**真宿主** —— 起一个真 DSH 实例、真浏览器点开的右栏，不是渲染稿：打开就是看板，项目名与板路径在顶上。
+
+![真机](docs/verify-real-host.png)
+
 ---
 
 ## pstack 是什么
