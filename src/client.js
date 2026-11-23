@@ -32,82 +32,112 @@ window.__ModuleLoader__.load({
       throw new Error((res && res.error && (res.error.message || res.error.code)) || '宿主没有响应')
     }
 
-    // ponytail: 一份 store 服务所有会话面板。右栏同一时刻只显示一个会话，所以切过去
-    // 会先清空再按新会话读；真要做成「两个会话并排各看各的板」，得把这块换成
-    // Map<sid, store> 并按 sid 取（deck 就是这么干的），代价是每个读取点都要带上 sid。
-    const store = {
-      catalog: null,
-      error: '',
-      loading: true,
-      q: '',
-      group: 'all',
-      open: null, // 技能名：详情页
-      detail: null,
-      draft: '', // 详情页里「注入」后的原文，注入失败时给用户手抄
-      zhOnly: false, // 有中文正文时默认显示中文，点一下切回原文
-      finish: null, // { id, state }：正在收尾哪张卡，收尾必须写一句结论
-      finNote: '',
-      sugOpen: '', // 展开了哪条建议（看 Jev 分数和命令）
-      node: null, // 流程图里下钻的卡号
-      view: 'board', // board | skills —— 默认看板：进来先看到「这个项目要干什么」，而不是 58 个技能名
-      sid: '', // 会话号：看板要用它换出这个会话的项目目录
-      cwd: '', // 这个会话的工作目录：面板自己先给，宿主就不必再猜
-      board: null,
-      sug: null, // 三层决策给出的 3~5 条建议
-      idea: '', // 新卡标题
-      kind: 'idea',
-      showDropped: false,
-      flow: false, // 看板：列表 or 流程图
-      toast: '',
-      toastAt: 0,
-      upd: null, // {current, latest, hasUpdate, error}；null = 还没问过 npm
-      updBusy: false,
+    // 每个会话一份 store。右栏并排开两个会话时，两边各读各的板、各记各的草稿，
+    // 不会互相覆盖；没有会话号时退回 shared。
+    // 竞品 dsh-mattpocock-skills-deck 的 lib/client.js:22768 就是这个形状：
+    //   const storeOf = (sid) => stores[sid] || (stores[sid] = makeStore(sid))
+    //   const useStore = (sid) => 订阅那一个 store 的 tick
+    // 差别只有一处：它不清 store（会话关掉也不回收），我这里也不清——一张板才几 KB，
+    // 真到了几百个会话再谈回收（ponytail: 无上界 Map，靠会话切换频率天然很低）。
+    const makeStore = () => {
+      const st = {
+        catalog: null,
+        error: '',
+        loading: true,
+        q: '',
+        group: 'all',
+        open: null, // 技能名：详情页
+        detail: null,
+        draft: '', // 详情页里「注入」后的原文，注入失败时给用户手抄
+        zhOnly: false, // 有中文正文时默认显示中文，点一下切回原文
+        finish: null, // { id, state }：正在收尾哪张卡，收尾必须写一句结论
+        finNote: '',
+        sugOpen: '', // 展开了哪条建议（看 Jev 分数和命令）
+        node: null, // 流程图里下钻的卡号
+        view: 'board', // board | skills —— 默认看板：进来先看到「这个项目要干什么」，而不是 58 个技能名
+        sid: '', // 会话号：看板要用它换出这个会话的项目目录
+        cwd: '', // 这个会话的工作目录：面板自己先给，宿主就不必再猜
+        board: null,
+        sug: null, // 三层决策给出的 3~5 条建议
+        idea: '', // 新卡标题
+        kind: 'idea',
+        showDropped: false,
+        flow: false, // 看板：列表 or 流程图
+        toast: '',
+        toastAt: 0,
+        upd: null, // {current, latest, hasUpdate, error}；null = 还没问过 npm
+        updBusy: false,
+        subs: new Set(),
+      }
+      st.set = (patch) => {
+        Object.assign(st, patch)
+        st.subs.forEach((fn) => fn(st))
+      }
+      st.emit = () => st.subs.forEach((fn) => fn(st))
+      return st
     }
-    const subs = new Set()
-    const emit = () => subs.forEach((fn) => fn(store))
-    const set = (patch) => {
-      Object.assign(store, patch)
-      emit()
+    const sharedStore = makeStore()
+    const stores = new Map()
+    const storeOf = (sid) => {
+      const key = String(sid || '')
+      if (!key) return sharedStore
+      let st = stores.get(key)
+      if (!st) {
+        st = makeStore()
+        st.sid = key
+        stores.set(key, st)
+      }
+      return st
     }
-    const useStore = () => {
+    // 订阅某一个会话的 store：会话号变了就换订阅，旧面板不会收到新会话的通知
+    const useStore = (sid) => {
+      const st = storeOf(sid)
       const [, force] = React.useState(0)
       React.useEffect(() => {
         const fn = () => force((n) => n + 1)
-        subs.add(fn)
-        return () => subs.delete(fn)
-      }, [])
-      return store
+        st.subs.add(fn)
+        return () => st.subs.delete(fn)
+      }, [st])
+      return st
+    }
+    // 组件里统一从 props 拿自己那份 store
+    const bind = (props) => {
+      const st = (props && props.st) || sharedStore
+      return [st, st.set]
     }
 
-    const load = async (fresh) => {
-      set({ loading: !store.catalog, error: '' })
+    const load = async (st, fresh) => {
+      const set = st.set
+      set({ loading: !st.catalog, error: '' })
       try {
         const cat = await rpc('catalog', fresh ? { fresh: true } : {})
-        set({ catalog: cat, loading: false })
+        st.set({ catalog: cat, loading: false })
       } catch (e) {
-        set({ loading: false, error: String((e && e.message) || e) })
+        st.set({ loading: false, error: String((e && e.message) || e) })
       }
     }
 
     // 问一次 npm 上有没有新版本。宿主那半缓存十分钟，所以开面板顺手查一下不心疼。
-    const checkUpd = async (fresh) => {
-      if (store.updBusy) return
-      set({ updBusy: true })
+    // 更新这件事其实是全局的（问的是 npm 上有没有新版），但挂在 store 上，
+    // 免得再单独拉一套状态；哪个会话先问谁先拿结果。
+    const checkUpd = async (st, fresh) => {
+      if (st.updBusy) return
+      st.set({ updBusy: true })
       try {
         const r = await rpc('update', fresh ? { fresh: true } : {})
-        set({ upd: r, updBusy: false })
+        st.set({ upd: r, updBusy: false })
       } catch (e) {
-        set({ upd: { error: String((e && e.message) || e) }, updBusy: false })
+        st.set({ upd: { error: String((e && e.message) || e) }, updBusy: false })
       }
     }
 
-    const openSkill = async (name) => {
-      set({ open: name, detail: null, draft: '' })
+    const openSkill = async (st, name) => {
+      st.set({ open: name, detail: null, draft: '' })
       try {
         const d = await rpc('skill', { name })
-        if (store.open === name) set({ detail: d })
+        if (st.open === name) st.set({ detail: d })
       } catch (e) {
-        if (store.open === name) set({ detail: { ok: false, message: String((e && e.message) || e) } })
+        if (st.open === name) st.set({ detail: { ok: false, message: String((e && e.message) || e) } })
       }
     }
 
@@ -123,7 +153,8 @@ window.__ModuleLoader__.load({
       return null
     }
 
-    const inject = (line) => {
+    const inject = (st, line) => {
+      const set = st.set
       const text = line.endsWith('\n') ? line : line + '\n'
       set({ draft: text })
       if (typeof inputDraft === 'function') {
@@ -249,11 +280,12 @@ window.__ModuleLoader__.load({
 
     const SkillRow = (props) => {
       const { skill, cat } = props
+      const [st] = bind(props)
       const missing = cat.missingDeps && cat.missingDeps[skill.name]
       const deps = skill.deps || []
       return h('div', {
         style: s.card(false),
-        onClick: () => openSkill(skill.name),
+        onClick: () => openSkill(st, skill.name),
         onMouseEnter: (e) => { e.currentTarget.style.borderColor = C.accent },
         onMouseLeave: (e) => { e.currentTarget.style.borderColor = C.line },
       }, [
@@ -268,13 +300,14 @@ window.__ModuleLoader__.load({
 
     const Detail = (props) => {
       const { name, detail, cat } = props
+      const [store, set] = bind(props)
       const skill = (cat.skills || []).find((x) => x.name === name) || { name }
       return h('div', null, [
         h('div', { key: 'top', style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } }, [
           h('button', { key: 'b', style: s.btn(), onClick: () => set({ open: null, detail: null }) }, '‹ 全部'),
           h('span', { key: 'n', style: { ...s.name, fontSize: 13 } }, '/' + name),
           h('div', { key: 'sp', style: { flex: 1 } }),
-          h('button', { key: 'i', style: s.btn('primary'), onClick: () => inject('/' + name + (skill.argumentHint ? ' ' : '')) }, '放进输入框'),
+          h('button', { key: 'i', style: s.btn('primary'), onClick: () => inject(store, '/' + name + (skill.argumentHint ? ' ' : '')) }, '放进输入框'),
         ]),
         h('div', { key: 'sub', style: { color: C.dim, marginBottom: 8, lineHeight: 1.5 } }, skill.zh || skill.description || ''),
         skill.principle ? h('div', { key: 'rule', style: { borderLeft: '2px solid ' + C.accent, paddingLeft: 8, margin: '8px 0', color: C.dim, fontSize: 12 } }, skill.principle.rule) : null,
@@ -297,7 +330,7 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    const Guide = () => h('div', { style: { marginBottom: 10 } }, [
+    const Guide = ({ st }) => h('div', { style: { marginBottom: 10 } }, [
       h('div', { key: 't', style: { ...s.faint, margin: '2px 0 6px' } }, '不知道点哪个？按这个顺序走'),
       ...GUIDE.map((step, i) => h('div', {
         key: step.id,
@@ -307,7 +340,7 @@ window.__ModuleLoader__.load({
           h('span', { key: 'i', style: { ...s.faint, fontFamily: C.mono } }, String(i + 1)),
           h('span', { key: 't', style: { fontWeight: 600 } }, step.title),
           h('div', { key: 's', style: { flex: 1 } }),
-          h('button', { key: 'b', style: s.btn('primary'), onClick: () => inject(step.inject) }, '用这个'),
+          h('button', { key: 'b', style: s.btn('primary'), onClick: () => inject(st, step.inject) }, '用这个'),
         ]),
         h('div', { key: 'w', style: { color: C.dim, marginTop: 3, fontSize: 12 } }, step.when),
       ])),
@@ -315,6 +348,7 @@ window.__ModuleLoader__.load({
 
     const List = (props) => {
       const { cat } = props
+      const [store, set] = bind(props)
       const q = store.q.trim().toLowerCase()
       const rows = (cat.skills || []).filter((sk) => {
         if (store.group !== 'all' && (sk.principle ? sk.principle.group : 'workflow') !== store.group) return false
@@ -323,13 +357,13 @@ window.__ModuleLoader__.load({
       })
       const showGuide = !q && store.group === 'all'
       return h('div', null, [
-        showGuide ? h(Guide, { key: 'g' }) : null,
+        showGuide ? h(Guide, { key: 'g', st: store }) : null,
         ...GROUP_ORDER.filter((g) => (cat.groups[g] || []).length).map((g) => {
           const hit = rows.filter((sk) => (sk.principle ? sk.principle.group : 'workflow') === g)
           if (!hit.length) return null
           return h('div', { key: g }, [
             h('div', { key: 'h', style: { ...s.faint, margin: '12px 0 6px', letterSpacing: '.06em' } }, `${GROUP_ZH[g] || g} · ${hit.length}`),
-            ...hit.map((sk) => h(SkillRow, { key: sk.name, skill: sk, cat })),
+            ...hit.map((sk) => h(SkillRow, { key: sk.name, skill: sk, cat, st: store })),
           ])
         }),
         rows.length ? null : h('div', { key: 'none', style: { ...s.faint, padding: '16px 4px' } }, '没有匹配的技能。'),
@@ -351,16 +385,17 @@ window.__ModuleLoader__.load({
 
     // 每个请求都带 sid + cwd：宿主那边按会话反查 cwd 会失败（插件 ctx 里不一定有 sessions 服务），
     // 面板这边从 useSessions 拿到的 cwd 才是准的。
-    const q = (extra) => ({ sessionId: store.sid, cwd: store.cwd, ...extra })
+    const q = (st, extra) => ({ sessionId: st.sid, cwd: st.cwd, ...extra })
 
-    const loadBoard = async () => {
+    const loadBoard = async (st) => {
+      const set = st.set
       try {
-        set({ board: await rpc('board', q()) })
+        set({ board: await rpc('board', q(st)) })
       } catch (e) {
         set({ toast: '读不到看板：' + String((e && e.message) || e), toastAt: Date.now() })
       }
       try {
-        set({ sug: await rpc('suggest', q()) })
+        set({ sug: await rpc('suggest', q(st)) })
       } catch (e) {
         set({ sug: null })
       }
@@ -369,7 +404,9 @@ window.__ModuleLoader__.load({
     const LAYER_ZH = { project: '按这个项目推', global: '项目里还没卡，看看别的项目', seed: '先起个头' }
 
     // 三层决策的结果：3~5 条，每条都带着写好的提示词，点一下就能发
-    const Suggest = () => {
+    const Suggest = ({ st }) => {
+      const store = st
+      const set = st.set
       const sug = store.sug
       if (!sug || !Array.isArray(sug.items) || !sug.items.length) return null
       return h('div', { key: 'sug', style: { marginBottom: 12 } }, [
@@ -382,10 +419,10 @@ window.__ModuleLoader__.load({
           const open = store.sugOpen === it.id
           const doIt = async (method, payload, ok) => {
             try {
-              const view = await rpc(method, q(payload))
+              const view = await rpc(method, q(store, payload))
               const patch = { board: view, toast: ok, toastAt: Date.now() }
               try {
-                patch.sug = await rpc('suggest', q())
+                patch.sug = await rpc('suggest', q(store))
               } catch {
                 /* 建议取不到不影响这次动作 */
               }
@@ -439,13 +476,13 @@ window.__ModuleLoader__.load({
                     onClick: async () => {
                       if (it.cardId && it.state !== 'doing' && !it.ask) {
                         try {
-                          await rpc('boardAct', q({ id: it.cardId, action: 'claim', owner: store.sid || 'me' }))
+                          await rpc('boardAct', q(store, { id: it.cardId, action: 'claim', owner: store.sid || 'me' }))
                         } catch {
                           /* 被挡着或已有人认领，注入照做 */
                         }
                       }
-                      inject(it.prompt)
-                      loadBoard()
+                      inject(store, it.prompt)
+                      loadBoard(store)
                     },
                   }, '执行这条命令'),
                   it.cardId ? h('button', {
@@ -454,7 +491,7 @@ window.__ModuleLoader__.load({
                     onClick: () => set({ finish: { id: it.cardId, state: 'done' }, finNote: '', sugOpen: '' }),
                   }, '标为完成') : null,
                 ]),
-                it.cardId ? FinishEditor({ id: it.cardId, call: doIt }) : null,
+                it.cardId ? FinishEditor({ id: it.cardId, call: doIt, st }) : null,
               ])
               : null,
           ])
@@ -464,7 +501,9 @@ window.__ModuleLoader__.load({
 
     // 收尾编辑器：完成和废弃都要一句结论才落盘。
     // 这不是形式主义——没有结论的「已完成」，三天后没人知道当时到底做了什么、验没验。
-    const FinishEditor = ({ id, call }) => {
+    const FinishEditor = ({ id, call, st }) => {
+      const store = st
+      const set = st.set
       const fin = store.finish
       if (!fin || fin.id !== id) return null
       const isDrop = fin.state === 'dropped'
@@ -494,16 +533,18 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    const Board = () => {
+    const Board = ({ st }) => {
+      const store = st
+      const set = st.set
       const b = store.board
       // 一次动作 = 一次整体刷新：卡片状态和「建议接下来做这几件」必须同一帧更新，
       // 否则卡片落进「完成」但推荐还停在上一条，人就会以为没生效。
       const call = async (method, payload, okText) => {
         try {
-          const view = await rpc(method, q(payload))
+          const view = await rpc(method, q(store, payload))
           const patch = { board: view, toast: okText, toastAt: Date.now() }
           try {
-            patch.sug = await rpc('suggest', q())
+            patch.sug = await rpc('suggest', q(store))
           } catch {
             /* 建议取不到不该挡住这次动作 */
           }
@@ -574,7 +615,7 @@ window.__ModuleLoader__.load({
               h('span', { key: 'n', style: { fontFamily: C.mono, fontSize: 11.5, color: C.accent, flex: 'none' } }, '/' + name),
               h('span', { key: 'z', style: { color: C.dim, fontSize: 11.5, flex: 1, minWidth: 0, wordBreak: 'break-word' } },
                 (sk && (sk.zh || sk.description)) || ''),
-              h('button', { key: 'u', style: { ...s.btn(), padding: '2px 8px', fontSize: 11, flex: 'none' }, onClick: () => inject('/' + name + ' ') }, '用这个'),
+              h('button', { key: 'u', style: { ...s.btn(), padding: '2px 8px', fontSize: 11, flex: 'none' }, onClick: () => inject(store, '/' + name + ' ') }, '用这个'),
             ])
           }),
         ])
@@ -584,7 +625,7 @@ window.__ModuleLoader__.load({
         h('div', { key: 'proj', style: { ...s.faint, fontSize: 10, marginBottom: 8, wordBreak: 'break-all' } },
           `📁 ${proj ? proj.name : ''} · ${b.root || b.cwd}${proj && proj.rel ? `（当前是它的子目录：${proj.rel}）` : ''}`),
         initCard,
-        h(Suggest, { key: 'sug' }),
+        h(Suggest, { key: 'sug', st: store }),
         skillList,
 
         h('div', { key: 'add', style: { display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap' } }, [
@@ -634,7 +675,7 @@ window.__ModuleLoader__.load({
             '⚠ 并行冲突：' + conflicts.pairs.map((p) => `#${p.a} 与 #${p.b} 都要动 ${p.paths.join('、')}`).join('；') + '。先串行，别同时改。')
           : null,
 
-        store.flow ? h(Flow, { key: 'flow' }) : null,
+        store.flow ? h(Flow, { key: 'flow', st: store }) : null,
         ...(store.flow ? [] : sections).map(({ key: st, label, rows }) => h('div', { key: st }, [
           h('div', { key: 'h', style: { ...s.faint, margin: '10px 0 6px', letterSpacing: '.06em' } }, `${label || STATE_LABEL[st] || st} · ${rows.length}`),
           ...rows.map((c) => h('div', { key: c.id, style: { ...s.card(false), cursor: 'default' } }, [
@@ -652,7 +693,7 @@ window.__ModuleLoader__.load({
                 `建议 /${sug.skill} · 紧急 ${sug.urgency != null ? sug.urgency.toFixed(2) : '?'} · 把握 ${sug.certainty != null ? sug.certainty.toFixed(2) : '?'}${sug.ask ? ' · 先确认' : ''}`) : null
             })(),
             h('div', { key: 'n', style: { marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } }, [
-              c.next ? h('button', { key: 'u', style: { ...s.btn('primary'), padding: '2px 8px', fontSize: 11 }, onClick: () => inject('/' + c.next.skill + ' ' + c.title) }, '/' + c.next.skill) : null,
+              c.next ? h('button', { key: 'u', style: { ...s.btn('primary'), padding: '2px 8px', fontSize: 11 }, onClick: () => inject(store, '/' + c.next.skill + ' ' + c.title) }, '/' + c.next.skill) : null,
               c.state === 'done' || c.state === 'dropped'
                 ? h('button', { key: 're', style: { ...s.btn(), padding: '2px 8px', fontSize: 11 }, onClick: () => call('boardAct', { id: c.id, action: 'reopen', note: '再试一次' }, '已重开，回到待办') }, '重开')
                 : null,
@@ -671,7 +712,7 @@ window.__ModuleLoader__.load({
                 : null,
               c.progress ? h('span', { key: 'p', style: { ...s.faint, fontSize: 10 } }, c.progress + ' 条进展') : null,
             ]),
-            FinishEditor({ id: c.id, call }),
+            FinishEditor({ id: c.id, call, st: store }),
           ])),
         ])),
       ])
@@ -686,7 +727,9 @@ window.__ModuleLoader__.load({
     }
 
     // 下钻：点图上一格，看这张卡现在到哪、下一步怎么做、以及「完结」的入口
-    const NodeDetail = ({ id }) => {
+    const NodeDetail = ({ id, st }) => {
+      const store = st
+      const set = st.set
       const card = ((store.board && store.board.cards) || []).find((c) => c.id === Number(id))
       if (!card) return null
       const it = ((store.sug && store.sug.items) || []).find((x) => x.cardId === card.id)
@@ -695,9 +738,9 @@ window.__ModuleLoader__.load({
       const prompt = it ? it.prompt : skill ? '/' + skill + ' #' + card.id + ' ' + card.title : ''
       const go = async (method, payload, ok) => {
         try {
-          set({ board: await rpc(method, q(payload)), toast: ok, toastAt: Date.now() })
+          set({ board: await rpc(method, q(store, payload)), toast: ok, toastAt: Date.now() })
           set({ node: null })
-          loadBoard()
+          loadBoard(store)
         } catch (e) {
           set({ toast: String((e && e.message) || e), toastAt: Date.now() })
         }
@@ -721,7 +764,7 @@ window.__ModuleLoader__.load({
           ? h('div', { key: 'c', style: { fontFamily: C.mono, fontSize: 11, background: 'rgba(0,0,0,.3)', border: '1px solid ' + C.line, borderRadius: 6, padding: '6px 8px', marginBottom: 8, userSelect: 'all', wordBreak: 'break-all' } }, prompt)
           : null,
         h('div', { key: 'a', style: { display: 'flex', gap: 6, flexWrap: 'wrap' } }, [
-          prompt ? h('button', { key: 'u', style: s.btn('primary'), onClick: () => inject(prompt) }, '执行这条命令') : null,
+          prompt ? h('button', { key: 'u', style: s.btn('primary'), onClick: () => inject(store, prompt) }, '执行这条命令') : null,
           card.state !== 'doing' && !closing && !(card.blocked || []).length
             ? h('button', { key: 's', style: s.btn(), onClick: () => act('claim', undefined) }, '我来做')
             : null,
@@ -738,12 +781,14 @@ window.__ModuleLoader__.load({
           h('div', { key: 'sp', style: { flex: 1 } }),
           h('button', { key: 'c0', style: { ...s.btn(), color: C.faint }, onClick: () => set({ node: null }) }, '收起'),
         ]),
-        FinishEditor({ id: card.id, call: go }),
+        FinishEditor({ id: card.id, call: go, st: store }),
       ])
     }
 
     // 拓扑：一列一层，连线指向前置 → 后继；废弃的画虚线、单列到底
-    const Flow = () => {
+    const Flow = ({ st }) => {
+      const store = st
+      const set = st.set
       const g = store.board && store.board.graph
       if (!g || !g.nodes.length) return h('div', { style: { ...s.faint, padding: '4px 0' } }, '还没有卡')
       const cards = (store.board && store.board.cards) || []
@@ -808,7 +853,7 @@ window.__ModuleLoader__.load({
           }),
           h('text', { key: 't', x: p.x + 5, y: p.y + H + 15 + i * 18, fill: '#8aa0c8', fontSize: 9.5, fontFamily: C.mono }, label),
         ])
-        ghosts.push(box(0, '→ /' + skill, '推荐下一步：' + (it ? it.prompt : '/' + skill), () => (it ? inject(it.prompt) : inject('/' + skill + ' #' + n.id + ' ' + n.title))))
+        ghosts.push(box(0, '→ /' + skill, '推荐下一步：' + (it ? it.prompt : '/' + skill), () => (it ? inject(store, it.prompt) : inject(store, '/' + skill + ' #' + n.id + ' ' + n.title))))
         ghosts.push(box(1, '✓ 完成 #' + n.id, '把它标为完成', () => set({ node: n.id })))
       }
       const edges = g.edges.map((e) => {
@@ -840,35 +885,34 @@ window.__ModuleLoader__.load({
         h('div', { key: 'svg', style: { overflowX: 'auto', overflowY: 'hidden', paddingBottom: 4 } },
           h('svg', { width, height, viewBox: `0 0 ${width} ${height}` }, [...edges, ...nodes, ...ghosts])),
         h('div', { key: 'h', style: { ...s.faint, fontSize: 10, marginTop: 4 } }, '点一格看这张卡下一步怎么走；虚线小格是预期线路：推荐的技能，和完成。'),
-        store.node ? h(NodeDetail, { key: 'nd', id: store.node }) : null,
+        store.node ? h(NodeDetail, { key: 'nd', id: store.node, st: store }) : null,
       ])
     }
 
     const Panel = (props) => {
-      useStore()
-      const cat = store.catalog
       // 面板是跟着会话走的：切了会话，看板就得换成那个会话所在的项目。
       // 宿主喂会话身份的入口不止一个（tab 的 sessionId、会话 store 的 hook、scope），
       // 只认其中一个就会卡在上一块板上——人是照着右栏看的，那看起来就是「没刷新」。
       const useSessions = props && typeof props.useSessions === 'function' ? props.useSessions : null
       const liveSid = useSessions ? useSessions((x) => (x && x.current) || '') : ''
       const sidNow = String((props && (props.sessionId || (props.scope && props.scope.sessionId))) || liveSid || '')
-      // 会话目录也从同一处拿：别等下一轮渲染再从 store.sid 反查，
-      // 那会先用空 cwd 发一次请求，宿主就得靠猜（猜错就是别人的板）。
-      const liveCwd = useSessions
-        ? useSessions((x) => (x && x.byId && sidNow && x.byId[sidNow] ? x.byId[sidNow].cwd || '' : ''))
+      // 每个会话一份 store：两个会话并排时，两块板、两份草稿各在各的 store 里
+      const store = useStore(sidNow)
+      const set = store.set
+      const liveCwd = useSessions && sidNow
+        ? useSessions((x) => (x && x.byId && x.byId[sidNow] ? x.byId[sidNow].cwd || '' : ''))
         : ''
       const cwdNow = String(liveCwd || (props && props.cwd) || '')
-      React.useEffect(() => { if (!cat && store.loading) load(false) }, [])
-      React.useEffect(() => { if (!store.upd) checkUpd(false) }, [])
+      const cat = store.catalog
+      // 目录变了才更新；板按会话各存一份，所以来回切会话不用清空重来
       React.useEffect(() => {
-        if (!sidNow || (sidNow === store.sid && cwdNow === store.cwd)) return
-        // 换会话时先把上一块板和它的建议清掉，否则新会话会先闪出别人的卡
-        set({ sid: sidNow, cwd: cwdNow, board: null, sug: null, sugOpen: null, node: null, finish: null, detail: null, open: null })
-      }, [sidNow, cwdNow])
-      // 默认就站在看板上，所以不用等谁点一下才去读；会话一变这里跟着重读
+        if (cwdNow && cwdNow !== store.cwd) set({ cwd: cwdNow })
+      }, [cwdNow])
+      React.useEffect(() => { if (!cat && store.loading) load(store, false) }, [])
+      React.useEffect(() => { if (!store.upd) checkUpd(store, false) }, [])
+      // 默认就站在看板上，所以不用等谁点一下才去读；会话或目录一变这里跟着重读
       React.useEffect(() => {
-        if (store.view === 'board' && store.sid) loadBoard()
+        if (store.view === 'board' && (store.sid || store.cwd)) loadBoard(store)
       }, [store.view, store.sid, store.cwd])
       // agent 干活是在会话里写的盘，面板不长眼睛。站在看板上就每 4 秒自己对一次，
       // 它一收尾这里就跟着动——不然人会一直盯着一个不动的「在做」。
@@ -876,7 +920,7 @@ window.__ModuleLoader__.load({
         if (store.view !== 'board') return undefined
         const t = setInterval(() => {
           if (store.finish || store.node) return // 正在写结论或看下钻，别把输入冲掉
-          loadBoard()
+          loadBoard(store)
         }, 4000)
         // 浏览器里 setInterval 返回数字；node 里（自渲染截图、测试的假 React）返回 Timeout。
         // unref 一下，否则这些假环境会因为一个轮询永远退不出去。
@@ -885,7 +929,7 @@ window.__ModuleLoader__.load({
       }, [store.view])
       const toBoard = () => {
         set({ view: 'board' })
-        if (!store.board) loadBoard()
+        loadBoard(store)
       }
       const toastFresh = store.toast && Date.now() - store.toastAt < 4000
 
@@ -908,19 +952,19 @@ window.__ModuleLoader__.load({
             onClick: () => checkUpd(true),
           }, store.upd.hasUpdate ? `↑ ${store.upd.latest}` : `${store.upd.current || '?'}`)
           : null,
-        cat ? h('button', { key: 'r', style: { ...s.btn(), padding: '2px 6px', fontSize: 11 }, onClick: () => { load(true); if (store.board) loadBoard() }, title: '重新读一遍磁盘' }, '刷新') : null,
+        cat ? h('button', { key: 'r', style: { ...s.btn(), padding: '2px 6px', fontSize: 11 }, onClick: () => { load(store, true); loadBoard(store) }, title: '重新读一遍磁盘' }, '刷新') : null,
       ])
 
       if (store.view === 'board') {
         return h('div', { style: s.wrap }, [
           head,
-          h(Board, { key: 'board' }),
+          h(Board, { key: 'board', st: store }),
           toastFresh ? h('div', { key: 'toast', style: { flex: 'none', margin: '0 10px 10px', padding: '6px 8px', borderRadius: 6, background: 'rgba(122,162,247,.14)', color: C.accent, fontSize: 11.5 } }, store.toast) : null,
         ])
       }
 
       if (store.open) {
-        return h('div', { style: s.wrap }, [head, h('div', { key: 'b', style: s.body }, h(Detail, { name: store.open, detail: store.detail, cat: cat || { skills: [] } }))])
+        return h('div', { style: s.wrap }, [head, h('div', { key: 'b', style: s.body }, h(Detail, { name: store.open, detail: store.detail, cat: cat || { skills: [] }, st: store }))])
       }
 
       if (store.error) {
@@ -967,7 +1011,7 @@ window.__ModuleLoader__.load({
         h('div', { key: 'body', style: s.body }, [
           cat.driftOk === false ? h('div', { key: 'drift', style: { color: '#f0b132', fontSize: 11.5, lineHeight: 1.6, marginBottom: 8 } },
             '本机 ~/.dsh/skills 和仓库不一致（缺 ' + (cat.drift.missing || []).length + ' 个、改了 ' + (cat.drift.changed || []).length + ' 个）。`/` 菜单读的是副本，跑之前先 npm run sync。') : null,
-          h(List, { key: 'list', cat }),
+          h(List, { key: 'list', cat, st: store }),
         ]),
         toastFresh ? h('div', { key: 'toast', style: { flex: 'none', margin: '0 10px 10px', padding: '6px 8px', borderRadius: 6, background: 'rgba(122,162,247,.14)', color: C.accent, fontSize: 11.5 } }, store.toast) : null,
       ])

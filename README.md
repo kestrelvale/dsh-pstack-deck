@@ -462,6 +462,10 @@ npm publish --registry=https://registry.npmjs.org --access public
 - 项目根识别只认 `.pstack/` 与 `.git/`，没有这两个标记的项目会**退化成用会话 cwd**；monorepo 里各子包共享根目录那块板，不会自动分包。
 - 初始化只写文件、不改你已有的 `AGENTS.md` 结构；如果项目用 `CLAUDE.md` 而非 `AGENTS.md`，现在还没跟着写。
 
+## 变更日志
+
+每个版本改了什么、为什么改、影响谁，都记在 [CHANGELOG.md](./CHANGELOG.md)；发版前先在「未发布」里写，发版时整段挪到版本号下。
+
 ## 参考链接
 
 **上游与教程**

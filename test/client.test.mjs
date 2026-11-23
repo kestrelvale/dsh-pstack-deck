@@ -210,6 +210,52 @@ test('面板半：进来就站在看板上，不用先点技能页', async () =>
   assert.match(textOf(Pane({ sessionId: 's0' })), /\/tdd/, '点完草稿里是斜杠命令')
 })
 
+test('面板半：两个会话并排，各自的板和草稿互不覆盖', async () => {
+  const mk = (sid, title) => ({
+    ok: true,
+    value: {
+      cwd: '/proj-' + sid, dir: '/proj-' + sid + '/.pstack/board',
+      project: { name: 'proj-' + sid, initialized: true, missing: [], rel: '' },
+      cards: [{ id: 1, kind: 'task', state: 'todo', title, body: '', progress: 0, next: null }],
+    },
+  })
+  const sug = { ok: true, value: { layer: 'project', items: [] } }
+  const asked = []
+  const { got } = boot((method, payload) => {
+    asked.push([method, payload && payload.sessionId])
+    if (method === 'suggest') return sug
+    if (method === 'board') return mk(payload.sessionId, 'A 项目的卡')
+    return catalogOk
+  })
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+
+  Pane({ sessionId: 'A' })
+  await tick()
+  Pane({ sessionId: 'B' })
+  await tick()
+
+  // B 读到的是自己那块（mock 里按 sid 给不同的板），渲染用的也必须是 B 的 store
+  const textB = textOf(Pane({ sessionId: 'B' }))
+  assert.match(textB, /proj-B/)
+
+  // 切回 A：A 的板还在自己的 store 里，不该被 B 冲掉，也不该再闪空
+  const textA = textOf(Pane({ sessionId: 'A' }))
+  assert.match(textA, /proj-A/)
+  assert.doesNotMatch(textA, /proj-B/, 'A 的面板不能显示 B 的板')
+
+  // 每个请求都带着发起它的那个会话号
+  assert.deepEqual(
+    [...new Set(asked.filter(([m]) => m === 'board').map(([, sid]) => sid))].sort(),
+    ['A', 'B'],
+  )
+
+  // 草稿也是分开的：在 A 里注入一条命令，B 的 store 不该沾上
+  clickByText(Pane({ sessionId: 'A' }), '全部技能')
+  clickByText(Pane({ sessionId: 'A' }), '用这个')
+  const draftA = textOf(Pane({ sessionId: 'A' }))
+  assert.match(draftA, /\/tdd/, 'A 里点完草稿有斜杠命令')
+})
+
 test('面板半：看板视图列出卡和下一步，按钮点得动', async () => {
   const board = {
     ok: true,
