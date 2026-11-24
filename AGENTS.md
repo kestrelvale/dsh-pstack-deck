@@ -8,3 +8,17 @@
 - 动手前先认领（`op: "claim"`），告诉别人这条你在做，别让两个会话撞在同一件事上。
 - 做完写一条进展（`op: "move"`），把结论留在卡上，别只留在对话里。
 - 不知道下一步做什么，调 `pstack_suggest`，它会给 3~5 条带现成提示词的动作。
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as GitHub issues in `kestrelvale/dsh-pstack-deck`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five canonical triage roles, each label string equal to its role name. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+multi-context. See `docs/agents/domain.md`.
