@@ -266,7 +266,7 @@ agent 自己也能用：
 | `pstack_use` | 取一个技能的正文，当作这次任务的操作说明（有中文就用中文） |
 | `pstack_suggest` | 给 3~5 条带现成提示词的建议 |
 | `pstack_init` | 初始化一个项目的板：地图卡 + `.pstack/README.md` + `AGENTS.md` 里的看板段 |
-| `pstack_board` | 看板：`list / add / move / claim / release / done / drop / reopen / next` |
+| `pstack_board` | 看板：`list / add / move / claim / release / done / drop / reopen / next`；改已有的卡可带 `expectedUpdatedAt`（列表里每张卡的 `at`），盘上变了就拒写并报 `conflict` |
 | `pstack_install` | 把技能装进某个项目的 `.dsh/skills`，让那个项目新开的会话也能用 |
 
 ### 4. 建议与流程图
@@ -404,6 +404,9 @@ src/
   anchor.js    从会话 cwd 上溯到项目根（先认 .pstack，再认 .git）
   init.js      初始化：地图卡 + .pstack/README.md + AGENTS.md 的看板段
   board.js     看板读写、依赖图、frontier、scope 冲突、地图四段
+  write.js     唯一落盘入口：同文件串行、版本闸（assertUnchanged）、只在真变了才写、tmp+rename 原子写
+  lock.js      同一个文件一把锁：三个写排队，不是最后一个赢
+  errors.js    失败分类（conflict/not-found/parse/unsupported/permission/env）每类带下一步
   suggest.js   三层决策（项目层 → 全局层 → 开场层）
   update.js    问 npm 有没有新版本（数字比版本、只缓存 latest）
   playbook.js  读 repo/skills/poteto-mode/playbooks 的 22 套剧本：标题、编号步骤、每步点名的技能
@@ -467,6 +470,7 @@ npm publish --registry=https://registry.npmjs.org --access public
 - `scope` 冲突是**路径前缀比对**，不是代码级依赖分析。同目录不同文件互依的情况挡不住。
 - WIP 上限没有硬拦：认领第二张 `doing` 不会拒绝，只会提醒「你手上还有 #N」。硬拦会挡住「一张卡拆成两半同时推进」的合理情况。
 - 卡进入 `done` / `dropped` 之后不会自动归档到别的文件，全躺在同一个 `.pstack/board/`；卡多了之后目录会长，暂时靠编号和分组读。
+- **版本闸要靠调用方带版本号**：不带 `expectedUpdatedAt` 时不比对 mtime，只靠「同文件串行 + 现读盘上底稿」保证不覆盖。面板和工具行都已经带上；手写脚本调 `saveCard` 忘了带，就退化成「读到的就是最新」。
 - 「收尾必须写结论」只在工具和面板上拦。手改 `.pstack/board/*.md` 把 `state: done` 写上去，是拦不住的 —— markdown 是真相，这是它的代价。
 - 地图「还没想清」的雾**不会自动毕业**成新卡，要人点一下。
 - 预期线路只画一步（推荐 → 完成），不画「完成之后接哪张」。

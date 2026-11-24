@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import {
   addProgress,
   boardRoot,
+  cyclesOf,
   graph,
   conflictsOf,
   frontierOf,
@@ -195,6 +196,77 @@ test('工具认项目：从 exec.agent.session.header.cwd 上溯，不再落到 
     const files = await readdir(join(dir, '.pstack', 'board'))
     assert.equal(files.length, 1)
     assert.match(files[0], /登录后偶发-401/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// #18：op=add 带 parent 线上静默吞掉过，回的还是看板列表。这条钉住它。
+test('工具建子卡带 parent：真落在盘上，父卡号记得住', async () => {
+  const { apply } = await import('../src/tools.js')
+  const regs = []
+  apply({ tools: { register: (d) => regs.push(d) }, get: () => undefined, effect: (f) => f() })
+  const board = regs.find((r) => r.name === 'pstack_board')
+  const dir = await tmp()
+  try {
+    const exec = { agent: { session: { header: { id: 's1', cwd: dir } } } }
+    assert.match(await board.execute({ op: 'add', kind: 'map', title: '这条路' }, exec), /#1 这条路/)
+    assert.match(await board.execute({ op: 'add', kind: 'task', title: '挂在地图下', parent: 1 }, exec), /#2/)
+    const files = await readdir(join(dir, '.pstack', 'board'))
+    const kid = files.find((f) => f.endsWith('.md') && /挂在地图下/.test(f))
+    assert.ok(kid, `子卡文件要真的存在：${files.join('、')}`)
+    assert.match(await readFile(join(dir, '.pstack', 'board', kid), 'utf8'), /parent: 1/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('工具改卡带旧版本号：拒写，报 conflict 并给下一步', async () => {
+  const { apply } = await import('../src/tools.js')
+  const regs = []
+  apply({ tools: { register: (d) => regs.push(d) }, get: () => undefined, effect: (f) => f() })
+  const board = regs.find((r) => r.name === 'pstack_board')
+  const dir = await tmp()
+  try {
+    const exec = { agent: { session: { header: { id: 's1', cwd: dir } } } }
+    await board.execute({ op: 'add', kind: 'task', title: '别覆盖我' }, exec)
+    const { cards } = await loadBoard(dir)
+    const [card] = cards
+    const err = await board
+      .execute({ op: 'move', id: card.id, state: 'doing', expectedUpdatedAt: card.at - 5000 }, exec)
+      .then(() => null, (e) => e)
+    assert.equal(err?.kind, 'conflict')
+    assert.match(err.message, /一个字都没写/)
+    assert.equal((await loadBoard(dir)).cards[0].state, 'idea', '状态不能被改')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// 环：卡是人手写的 markdown，依赖成环随时能写出来，而且环里的卡谁都开不了工。
+test('依赖成环：两条互等被揪出来，自等和正常链不误报', () => {
+  const cards = [
+    { id: 1, after: [2] },
+    { id: 2, after: [1] },
+    { id: 3, after: [4] },
+    { id: 4, after: [] },
+    { id: 5, after: [5] },
+    { id: 6, after: [99] }, // 指着不存在的卡：不是环
+  ]
+  const rings = cyclesOf(cards)
+  assert.equal(rings.length, 1)
+  assert.deepEqual(rings[0], [1, 2, 1], '要能看出从哪回到哪')
+  assert.deepEqual(conflictsOf(cards).rings, rings, '看板把它当冲突一起报')
+})
+
+test('父子成环：子卡成了父卡的祖先也报出来', async () => {
+  const dir = await tmp()
+  try {
+    const a = await saveCard(dir, { kind: 'task', title: '甲' })
+    const b = await saveCard(dir, { kind: 'task', title: '乙', parent: a.id })
+    await saveCard(dir, { id: a.id, title: '甲', parent: b.id }) // 手写出来的环
+    const rings = (await loadBoard(dir)).cards.length && conflictsOf((await loadBoard(dir)).cards).rings
+    assert.equal(rings.length, 1)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

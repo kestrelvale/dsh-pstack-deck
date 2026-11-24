@@ -4,10 +4,13 @@
 // 为什么是文件而不是数据库：卡本来就是给人读给人改的东西，git diff 里看得见、
 // 手改不会跟插件打架、换机器拷目录就走。清单每次都现读磁盘，谁都不另存索引。
 
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { parseFrontmatter } from './catalog.js'
+import { failAs } from './errors.js'
+import { withKeyLock } from './lock.js'
+import { assertUnchanged, mtimeOf, rewriteText, writeNew } from './write.js'
 
 /** 相对项目根的看板目录。 */
 export const BOARD_REL = '.pstack/board'
@@ -30,6 +33,8 @@ const now = () => new Date().toISOString().replace(/\.\d+Z$/, 'Z')
 
 /** 一张卡里的「## 进展」条目。追加，不改写历史。 */
 const progressLines = (body) => (String(body).match(/^- \d{4}-[^\n]*$/gm) ?? [])
+const progressLine = (text, state) =>
+  `- ${new Date().toISOString().slice(0, 10)} ${state ? `[${stateZh(state)}] ` : ''}${String(text ?? '').trim()}`
 
 function stringify(card) {
   const fm = [
@@ -95,7 +100,8 @@ export async function loadBoard(cwd) {
   for (const f of files) {
     try {
       const card = toCard(f, await readFile(join(dir, f), 'utf8'))
-      if (card) cards.push(card)
+      // 顺手记下这一版的 mtime：读到卡的人拿着它，改的时候能说「我改的是这一版」
+      if (card) cards.push({ ...card, at: await mtimeOf(join(dir, f)) })
     } catch {
       /* 单个文件坏了不该让整个看板读不出来 */
     }
@@ -104,46 +110,90 @@ export async function loadBoard(cwd) {
   return { cwd, dir, cards }
 }
 
-/** 写一张卡（新建或更新同一个 id）。返回这张卡。 */
+/**
+ * 改一张已经存在的卡：底稿是刚读到的盘上文本，不是调用方内存里那份旧对象。
+ * 人手改过的段落因此活得过下一次自动写——只动这次真该动的那几个字段。
+ * ponytail: 卡头里不认识的键会被丢掉（stringify 只写已知字段）；
+ * 等真有人往卡头加自定义字段，再在 stringify 里保留原文未知键。
+ */
+async function editCard(cwd, id, apply, { expectedUpdatedAt } = {}) {
+  const board = await loadBoard(cwd)
+  const card = board.cards.find((c) => c.id === Number(id))
+  if (!card) throw failAs('not-found', `看板里没有第 ${id} 号卡`, '先 pstack_board op=list 看清编号')
+  const path = join(board.dir, card.file)
+  const r = await rewriteText(
+    path,
+    (before) => apply(toCard(card.file, before ?? '') ?? card, before ?? ''),
+    { expectedUpdatedAt },
+  )
+  const back = toCard(card.file, r.text)
+  if (!back) throw failAs('parse', `这张卡读不回来：${card.file}`, '看板目录可能被别的东西改坏了')
+  return { ...back, written: r.written, reason: r.reason, at: await mtimeOf(path) }
+}
+
+/** 写一张卡（新建或更新同一个 id）。返回盘上现在这张卡。 */
 export async function saveCard(cwd, input) {
   const dir = boardRoot(cwd)
   await mkdir(dir, { recursive: true })
-  const board = await loadBoard(cwd)
-  const existing = input.id ? board.cards.find((c) => c.id === Number(input.id)) : null
-  const id = existing ? existing.id : board.cards.reduce((m, c) => Math.max(m, c.id), 0) + 1
-  const card = {
-    id,
-    kind: KINDS.includes(input.kind) ? input.kind : (existing?.kind ?? 'idea'),
-    state: STATES.includes(input.state) ? input.state : (existing?.state ?? 'idea'),
-    title: String(input.title ?? existing?.title ?? '').trim() || '(无标题)',
-    created: existing?.created || now(),
-    updated: now(),
-    skills: input.skills ?? existing?.skills ?? [],
-    after: input.after !== undefined ? input.after.map(Number).filter((n) => Number.isInteger(n) && n > 0 && n !== id) : (existing?.after ?? []),
-    parent: input.parent !== undefined ? (Number(input.parent) > 0 && Number(input.parent) !== id ? Number(input.parent) : undefined) : existing?.parent,
-    owner: input.owner !== undefined ? (String(input.owner).trim() || undefined) : existing?.owner,
-    scope: input.scope !== undefined ? input.scope.map((x) => String(x).trim()).filter(Boolean) : (existing?.scope ?? []),
-    verify: input.verify !== undefined ? (String(input.verify).trim() || undefined) : existing?.verify,
-    playbook: input.playbook !== undefined ? (String(input.playbook).trim() || undefined) : existing?.playbook,
-    step: input.step !== undefined ? (Number(input.step) > 0 ? Number(input.step) : undefined) : existing?.step,
-    body: input.body ?? existing?.body ?? '',
-  }
-  // 标题变了就把文件名跟着改，看板目录在文件管理器里才好认
-  const name = `${card.id}-${slug(card.title)}.md`
-  const oldPath = existing ? join(dir, existing.file) : null
-  await writeFile(join(dir, name), stringify(card), 'utf8')
-  if (oldPath && oldPath !== join(dir, name)) await rm(oldPath, { force: true })
-  return toCard(name, stringify(card))
+  // 整板一把锁：两个 add 同时进来，编号不能撞
+  return withKeyLock(dir, async () => {
+    const board = await loadBoard(cwd)
+    const existing = input.id ? board.cards.find((c) => c.id === Number(input.id)) : null
+    const id = existing ? existing.id : board.cards.reduce((m, c) => Math.max(m, c.id), 0) + 1
+    const card = {
+      id,
+      kind: KINDS.includes(input.kind) ? input.kind : (existing?.kind ?? 'idea'),
+      state: STATES.includes(input.state) ? input.state : (existing?.state ?? 'idea'),
+      title: String(input.title ?? existing?.title ?? '').trim() || '(无标题)',
+      created: existing?.created || now(),
+      updated: now(),
+      skills: input.skills ?? existing?.skills ?? [],
+      // 单个卡号也收：手写脚本传 after: 3 不该炸在 .map 上
+      after: input.after !== undefined
+        ? [].concat(input.after).map(Number).filter((n) => Number.isInteger(n) && n > 0 && n !== id)
+        : (existing?.after ?? []),
+      parent: input.parent !== undefined ? (Number(input.parent) > 0 && Number(input.parent) !== id ? Number(input.parent) : undefined) : existing?.parent,
+      owner: input.owner !== undefined ? (String(input.owner).trim() || undefined) : existing?.owner,
+      scope: input.scope !== undefined ? input.scope.map((x) => String(x).trim()).filter(Boolean) : (existing?.scope ?? []),
+      verify: input.verify !== undefined ? (String(input.verify).trim() || undefined) : existing?.verify,
+      playbook: input.playbook !== undefined ? (String(input.playbook).trim() || undefined) : existing?.playbook,
+      step: input.step !== undefined ? (Number(input.step) > 0 ? Number(input.step) : undefined) : existing?.step,
+      body: input.body ?? existing?.body ?? '',
+    }
+    // 标题变了就把文件名跟着改，看板目录在文件管理器里才好认
+    const name = `${card.id}-${slug(card.title)}.md`
+    const target = join(dir, name)
+    const oldPath = existing ? join(dir, existing.file) : null
+    const text = stringify(card)
+    if (!existing) await writeNew(target, text)
+    else {
+      // 换文件名那条路也要过版本闸：不然「改个标题」就成了绕过乐观锁的后门
+      await assertUnchanged(oldPath, input.expectedUpdatedAt)
+      if (oldPath === target) await rewriteText(target, () => text)
+      else {
+        // 写新的 + 删旧的，两笔都在同一把锁里，不中途露出半张卡
+        await writeNew(target, text)
+        await rm(oldPath, { force: true })
+      }
+    }
+    const back = toCard(name, await readFile(target, 'utf8'))
+    if (!back) throw failAs('parse', `写进去的卡读不回来：${name}`, '看板目录可能被别的东西改坏了')
+    return { ...back, written: true, at: await mtimeOf(target) }
+  })
 }
 
-/** 追加一行进展（带日期），并顺手改状态。 */
-export async function addProgress(cwd, id, note, state) {
-  const board = await loadBoard(cwd)
-  const card = board.cards.find((c) => c.id === Number(id))
-  if (!card) throw new Error(`看板里没有第 ${id} 号卡`)
-  const line = `- ${new Date().toISOString().slice(0, 10)} ${state ? `[${stateZh(state)}] ` : ''}${String(note ?? '').trim()}`
-  const body = card.body.replace(/\s+$/, '') + (card.body.trim() ? '\n' : '') + line + '\n'
-  return saveCard(cwd, { ...card, body, state: state ?? card.state })
+/** 追加一行进展（带日期），并顺手改状态。底稿是盘上原文，不整张覆盖。 */
+export async function addProgress(cwd, id, note, state, { expectedUpdatedAt } = {}) {
+  return editCard(
+    cwd,
+    id,
+    (card) => {
+      const cur = String(card.body ?? '')
+      const body = cur.replace(/\s+$/, '') + (cur.trim() ? '\n' : '') + progressLine(note, state) + '\n'
+      return stringify({ ...card, state: state ?? card.state, updated: now(), body })
+    },
+    { expectedUpdatedAt },
+  )
 }
 
 /**
@@ -265,6 +315,36 @@ const covers = (a, b) => {
 }
 
 /** 正在做的卡里，谁的 scope 撞了；没写 scope 的另列出来当提醒。 */
+/**
+ * 依赖成环：A 等 B、B 等 A，谁都开不了工；子卡成了父卡的祖先也画不出流程图。
+ * 卡是人手写的 markdown，环随时可能被手写出来，所以不能只在建依赖时拦。
+ */
+export function cyclesOf(cards) {
+  const byId = new Map(cards.map((c) => [c.id, c]))
+  const edges = new Map(cards.map((c) => [c.id, []]))
+  for (const c of cards) {
+    for (const a of c.after ?? []) if (byId.has(a) && a !== c.id) edges.get(c.id).push(a)
+    if (c.parent && byId.has(c.parent) && c.parent !== c.id) edges.get(c.id).push(c.parent)
+  }
+  const rings = []
+  const mark = new Map() // 0/缺：没走；1：正在这条路上；2：走完了
+  const walk = (id, stack) => {
+    mark.set(id, 1)
+    stack.push(id)
+    for (const n of edges.get(id)) {
+      if (mark.get(n) === 1) {
+        const ring = stack.slice(stack.indexOf(n))
+        ring.push(n)
+        rings.push(ring)
+      } else if (!mark.get(n)) walk(n, stack)
+    }
+    stack.pop()
+    mark.set(id, 2)
+  }
+  for (const c of cards) if (!mark.get(c.id)) walk(c.id, [])
+  return rings
+}
+
 export function conflictsOf(cards) {
   const doing = cards.filter((c) => isOpen(c) && c.state === 'doing')
   const pairs = []
@@ -279,7 +359,7 @@ export function conflictsOf(cards) {
     }
   }
   const unscoped = doing.filter((c) => !(c.scope ?? []).length).map((c) => c.id)
-  return { pairs, unscoped }
+  return { pairs, unscoped, rings: cyclesOf(cards) }
 }
 
 /** 地图卡：一块板最多一张，挂着这次要去哪、已经定了什么、还有什么糊着。 */
@@ -359,82 +439,114 @@ export function appendToSection(body, label, line) {
 }
 
 /**
+ * 地图上那一行指针：人读得懂、点得开、按链接去重。
+ * 摘要超 120 字截断——地图是索引，不是档案（竞品 issues-status.js:126 同一决定）。
+ */
+export function mapPointerLine({ id, title, file, gist = '', dropped = false }) {
+  const flat = String(gist).replace(/\s+/g, ' ').trim()
+  const chars = [...flat]
+  const short = chars.length > 120 ? chars.slice(0, 120).join('') + '…' : flat
+  return `- #${id} ${title} —— ${dropped ? '放掉了：' : ''}${short || title} [→](${file})`
+}
+
+/**
+ * 往地图追加指针。盘上已经有指向这张卡的链接就不动——
+ * 重开之后又结一次，不该给地图添第二条（竞品的 indexOf("](link)") 幂等）。
+ */
+export async function appendMapPointer(cwd, mapId, { card, dropped = false } = {}) {
+  const link = `](${card.file})`
+  const section = dropped ? '不做什么' : '已经定了'
+  let added = false
+  const map = await editCard(cwd, mapId, (live, before) => {
+    if (String(live.body ?? '').includes(link)) return before
+    added = true
+    const body = appendToSection(live.body, section, mapPointerLine({ id: card.id, title: card.title, file: card.file, gist: answerOf(card), dropped }))
+    return stringify({ ...live, updated: now(), body })
+  })
+  return { ...map, added }
+}
+
+/**
  * 结束一张卡：done（做成了）或 dropped（放掉了）。两者都必须带一句结论。
  * 完成 → 地图「已经定了」记一笔；废弃 → 地图「不做什么」记一笔。
  */
-export async function finishCard(cwd, id, { state = 'done', note = '' } = {}) {
+export async function finishCard(cwd, id, { state = 'done', note = '', expectedUpdatedAt } = {}) {
   const target = String(state)
   if (target !== 'done' && target !== 'dropped') {
-    throw new Error(`结束只能是 done 或 dropped，收到的是 ${target}`)
+    throw failAs('unsupported', `结束只能是 done 或 dropped，收到的是 ${target}`, '要改状态用取消认领，结束是一次带结论的动作')
   }
   const text = String(note ?? '').trim()
   if (!text) {
-    throw new Error(target === 'done'
-      ? '完成要写一句结论：这次到底做成了什么、验过没有（会写进卡里的「## 结论」）'
-      : '废弃要写一句原因：为什么不做了（会写进卡里的「## 结论」）')
+    throw failAs(
+      'unsupported',
+      target === 'done'
+        ? '完成要写一句结论：这次到底做成了什么、验过没有（会写进卡里的「## 结论」）'
+        : '废弃要写一句原因：为什么不做了（会写进卡里的「## 结论」）',
+      '把做完的样子、或者不做的理由说清楚再点',
+    )
   }
   const board = await loadBoard(cwd)
   const card = board.cards.find((c) => c.id === Number(id))
-  if (!card) throw new Error(`看板里没有第 ${id} 号卡`)
-  if (card.kind === 'map') throw new Error('地图不是活：改它的四段就好，别把它标成完成')
-  if (card.state === target) throw new Error(`#${card.id} 已经是${stateZh(target)}了`)
+  if (!card) throw failAs('not-found', `看板里没有第 ${id} 号卡`, '先 pstack_board op=list 看清编号')
+  if (card.kind === 'map') throw failAs('unsupported', '地图不是活：改它的四段就好，别把它标成完成', '把要做的事拆成子卡再结')
+  if (card.state === target) throw failAs('conflict', `#${card.id} 已经是${stateZh(target)}了`, '看板上它就是这个状态，不用再结一次')
 
-  let body = String(card.body ?? '').trimEnd()
-  body = answerOf(card)
-    ? `${body}\n- ${text}\n`
-    : `${body}\n\n${ANSWER_HEAD}\n\n${text}\n`
-
-  // 先改卡：状态、认领人清空、结论落盘、进展留痕
-  const saved = await saveCard(cwd, { id: card.id, title: card.title, state: target, owner: '' })
-  await saveCard(cwd, { id: saved.id, title: saved.title, body })
-  const withAnswer = await addProgress(cwd, card.id, text, target)
+  // 一笔事务落完：状态、认领人清空、结论进「## 结论」、进展留痕
+  const finished = await editCard(cwd, card.id, (live) => {
+    let body = String(live.body ?? '').trimEnd()
+    body = answerOf(live) ? `${body}\n- ${text}\n` : `${body}\n\n${ANSWER_HEAD}\n\n${text}\n`
+    body = `${body.replace(/\s+$/, '')}\n${progressLine(text, target)}\n`
+    return stringify({ ...live, state: target, owner: undefined, updated: now(), body })
+  }, { expectedUpdatedAt })
 
   // 再把这一笔写回地图：换了别人接手，翻地图就知道当时定了什么
   const map = (card.parent && board.cards.find((c) => c.id === card.parent)) || mapOf(board.cards)
-  if (map && map.id !== card.id) {
-    const line = target === 'done'
-      ? `- #${card.id} ${card.title} —— ${text}`
-      : `- #${card.id} ${card.title} —— 放掉了：${text}`
-    await saveCard(cwd, {
-      id: map.id,
-      title: map.title,
-      body: appendToSection(map.body, target === 'done' ? '已经定了' : '不做什么', line),
-    })
-  }
-  return withAnswer
+  if (map && map.id !== card.id) await appendMapPointer(cwd, map.id, { card: finished, dropped: target === 'dropped' })
+  return finished
 }
 
 /**
  * 重开一张已结束的卡：回到待办，认领人清空。
  * 废弃不等于删除——当时想的路走不通，换个做法还能接着用同一个编号。
  */
-export async function reopenCard(cwd, id, { note = '' } = {}) {
+export async function reopenCard(cwd, id, { note = '', expectedUpdatedAt } = {}) {
   const board = await loadBoard(cwd)
   const card = board.cards.find((c) => c.id === Number(id))
-  if (!card) throw new Error(`看板里没有第 ${id} 号卡`)
-  if (card.kind === 'map') throw new Error(`#${card.id} 是地图，不用重开`)
-  if (isOpen(card)) throw new Error(`#${card.id} 还没结束（${stateZh(card.state)}），不用重开`)
+  if (!card) throw failAs('not-found', `看板里没有第 ${id} 号卡`, '先 pstack_board op=list 看清编号')
+  if (card.kind === 'map') throw failAs('unsupported', `#${card.id} 是地图，不用重开`, '')
+  if (isOpen(card)) throw failAs('conflict', `#${card.id} 还没结束（${stateZh(card.state)}），不用重开`, '它就是开着的')
   const why = String(note ?? '').trim()
-  const reopened = await saveCard(cwd, { id: card.id, title: card.title, state: 'todo', owner: '' })
-  return addProgress(cwd, reopened.id, why ? `重开：${why}` : '重开', 'todo')
+  // 一笔：状态回待办、认领人放开、进展留痕
+  return editCard(cwd, card.id, (live) => {
+    const body = `${String(live.body ?? '').replace(/\s+$/, '')}\n${progressLine(why ? `重开：${why}` : '重开', 'todo')}\n`
+    return stringify({ ...live, state: 'todo', owner: undefined, updated: now(), body })
+  }, { expectedUpdatedAt })
 }
 
 /** 认领：先改状态再动手，别人扫一眼就知道这张有人在弄。 */
-export async function claimCard(cwd, id, { owner = 'me', scope = [] } = {}) {
+export async function claimCard(cwd, id, { owner = 'me', scope = [], expectedUpdatedAt } = {}) {
   const board = await loadBoard(cwd)
   const card = board.cards.find((c) => c.id === Number(id))
-  if (!card) throw new Error(`看板里没有第 ${id} 号卡`)
-  if (card.kind === 'map') throw new Error(`#${card.id} 是地图，不是活`)
-  if (!isOpen(card)) throw new Error(`#${card.id} 已经结束了，先 reopen 再认领`)
+  if (!card) throw failAs('not-found', `看板里没有第 ${id} 号卡`, '先 pstack_board op=list 看清编号')
+  if (card.kind === 'map') throw failAs('unsupported', `#${card.id} 是地图，不是活`, '')
+  if (!isOpen(card)) throw failAs('conflict', `#${card.id} 已经结束了，先 reopen 再认领`, '重开之后才能再有人接')
   const blockers = blockersOf(card, board.cards)
-  if (blockers.length) throw new Error(`#${card.id} 还被挡着：等 ${blockers.map((n) => '#' + n).join('、')} 做完`)
-  if (card.owner && card.owner !== owner) throw new Error(`#${card.id} 已经被 ${card.owner} 认领了`)
-  const saved = await saveCard(cwd, {
-    id: card.id,
-    title: card.title,
-    state: 'doing',
-    owner,
-    scope: scope.length ? scope : card.scope,
-  })
-  return addProgress(cwd, saved.id, `认领：${owner}`, 'doing')
+  if (blockers.length) {
+    throw failAs('unsupported', `#${card.id} 还被挡着：等 ${blockers.map((n) => '#' + n).join('、')} 做完`, '先做前置，顺序不是随便排的')
+  }
+  if (card.owner && card.owner !== owner) {
+    throw failAs('conflict', `#${card.id} 已经被 ${card.owner} 认领了`, '问一声，或者由他取消认领')
+  }
+  // 一笔：状态、认领人、范围、进展一起落
+  return editCard(cwd, card.id, (live) => {
+    const body = `${String(live.body ?? '').replace(/\s+$/, '')}\n${progressLine(`认领：${owner}`, 'doing')}\n`
+    return stringify({
+      ...live,
+      state: 'doing',
+      owner,
+      scope: scope.length ? scope : live.scope,
+      updated: now(),
+      body,
+    })
+  }, { expectedUpdatedAt })
 }

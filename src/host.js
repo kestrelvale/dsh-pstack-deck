@@ -33,6 +33,7 @@ import {
 import { projectName, projectRoot, relFrom } from './anchor.js'
 import { buildCatalog, toProviderItem, repoRoot, zhRoot, PROVIDER, PKG_ROOT } from './catalog.js'
 import { checkEnv } from './env.js'
+import { errorOf } from './errors.js'
 import { detectInit, initProject } from './init.js'
 import { candidatesOf, suggest } from './suggest.js'
 import { listPlaybooks, playbookByName } from './playbook.js'
@@ -175,6 +176,7 @@ const methods = {
       parent: payload?.parent !== undefined ? payload.parent : undefined,
       verify: payload?.verify,
       after: Array.isArray(payload?.after) ? payload.after : undefined,
+      expectedUpdatedAt: Number.isFinite(Number(payload?.expectedUpdatedAt)) ? Number(payload.expectedUpdatedAt) : undefined,
     })
     return { ok: true, value: await view(await loadBoard(cwd), resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)) }
   },
@@ -198,7 +200,7 @@ const methods = {
     try {
       await addProgress(cwd, id, note || `→ ${stateZh(state)}`, state)
     } catch (e) {
-      return { ok: false, error: { code: 'no-card', message: String(e?.message ?? e) } }
+      return { ok: false, error: { code: 'no-card', kind: e?.kind ?? 'unknown', message: String(e?.message ?? e), hint: String(e?.hint ?? '') } }
     }
     return { ok: true, value: await view(await loadBoard(cwd), resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)) }
   },
@@ -214,16 +216,20 @@ const methods = {
     if (!Number.isInteger(id) || id <= 0) return { ok: false, error: { code: 'bad-id', message: '卡号不对' } }
     const action = String(payload?.action ?? '').trim()
     const note = String(payload?.note ?? '').trim()
+    // 面板手里那版卡的版本号：盘上已经变了就拒写，别拿旧对象盖掉人的手动改动
+    const v = Number.isFinite(Number(payload?.expectedUpdatedAt)) && payload.expectedUpdatedAt !== undefined && payload.expectedUpdatedAt !== null
+      ? Number(payload.expectedUpdatedAt)
+      : undefined
     let touched
     try {
-      if (action === 'claim') touched = await claimCard(cwd, id, { owner: String(payload?.owner ?? 'me'), scope: Array.isArray(payload?.scope) ? payload.scope : [] })
-      else if (action === 'done') touched = await finishCard(cwd, id, { state: 'done', note })
-      else if (action === 'drop') touched = await finishCard(cwd, id, { state: 'dropped', note })
-      else if (action === 'reopen') touched = await reopenCard(cwd, id, { note })
-      else if (action === 'release') touched = await saveCard(cwd, { id, owner: '' })
+      if (action === 'claim') touched = await claimCard(cwd, id, { owner: String(payload?.owner ?? 'me'), scope: Array.isArray(payload?.scope) ? payload.scope : [], expectedUpdatedAt: v })
+      else if (action === 'done') touched = await finishCard(cwd, id, { state: 'done', note, expectedUpdatedAt: v })
+      else if (action === 'drop') touched = await finishCard(cwd, id, { state: 'dropped', note, expectedUpdatedAt: v })
+      else if (action === 'reopen') touched = await reopenCard(cwd, id, { note, expectedUpdatedAt: v })
+      else if (action === 'release') touched = await saveCard(cwd, { id, owner: '', expectedUpdatedAt: v })
       else return { ok: false, error: { code: 'bad-action', message: `不认识的 action：${action}` } }
     } catch (e) {
-      return { ok: false, error: { code: 'rejected', message: String(e?.message ?? e) } }
+      return { ok: false, error: { code: 'rejected', kind: e?.kind ?? 'unknown', message: String(e?.message ?? e), hint: String(e?.hint ?? '') } }
     }
     const nextBoard = await loadBoard(cwd)
     return {
@@ -393,7 +399,8 @@ function registerRoute(ctx) {
     try {
       result = await fn(call.payload, ctx)
     } catch (e) {
-      result = { ok: false, error: 'internal', message: String(e?.message ?? e) }
+      // 失败带着分类和下一步一起回去：面板按 kind 上色，人照着 hint 动手
+      result = { ok: false, error: 'internal', ...errorOf(e) }
     }
     return Response.json({ type: 'server-response', rpcId, result })
   }

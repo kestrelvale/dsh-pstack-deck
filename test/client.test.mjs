@@ -420,7 +420,7 @@ test('看板：地图、冲突横幅、可开工与认领按钮都在', async ()
         children: 2,
         sections: { destination: '大文件导出不 OOM', decisions: '用 node 的 stream', fog: '断点续传要不要做', out: '' },
       },
-      conflicts: { pairs: [{ a: 1, b: 2, paths: ['src/api'] }], unscoped: [] },
+      conflicts: { pairs: [{ a: 1, b: 2, paths: ['src/api'] }], unscoped: [], rings: [[3, 4, 3]] },
       graph: { nodes: [], edges: [], lines: [], depthMax: 0 },
       cards: [
         { id: 9, kind: 'map', state: 'todo', title: '把导出改成流式', body: '', progress: 0, after: [] },
@@ -442,6 +442,7 @@ test('看板：地图、冲突横幅、可开工与认领按钮都在', async ()
   assert.match(text, /大文件导出不 OOM/)
   assert.match(text, /断点续传要不要做/)
   assert.match(text, /并行冲突/)
+  assert.match(text, /依赖成环：#3 → #4 → #3/, '环里的卡开不了工，要当着人的面说出来')
   assert.match(text, /可开工/)
   assert.match(text, /被挡着/)
   assert.match(text, /我来做/)
@@ -461,7 +462,7 @@ test('看板：完成要先写结论；写完卡片落进完成组，建议跟�
       frontier: state === 'doing' ? [] : [1],
       cards: [{
         id: 1, kind: 'bug', state, owner: state === 'doing' ? 'me' : undefined,
-        title: '登录后偶发 401', body: '', progress: 1, after: [],
+        title: '登录后偶发 401', body: '', progress: 1, after: [], at: 111,
         answer,
         next: state === 'doing' ? { skill: 'correct', why: '把这次修复变成一条规则' } : null,
         blocked: [],
@@ -519,6 +520,7 @@ test('看板：完成要先写结论；写完卡片落进完成组，建议跟�
   const acts = calls.filter(([m]) => m === 'boardAct')
   assert.equal(acts.length, 1)
   assert.deepEqual(acts[0][1].action, 'done')
+  assert.equal(acts[0][1].expectedUpdatedAt, 111, '改卡要带上读到的版本号，盘上变了宿主才好拒写')
   assert.match(acts[0][1].note, /Safari 复测通过/)
   assert.ok(calls.filter(([m]) => m === 'suggest').length >= 2, '动作之后要重新算建议')
 

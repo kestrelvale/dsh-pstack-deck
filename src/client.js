@@ -392,7 +392,17 @@ window.__ModuleLoader__.load({
 
     // 每个请求都带 sid + cwd：宿主那边按会话反查 cwd 会失败（插件 ctx 里不一定有 sessions 服务），
     // 面板这边从 useSessions 拿到的 cwd 才是准的。
-    const q = (st, extra) => ({ sessionId: st.sid, cwd: st.cwd, ...extra })
+    // 面板手里那版卡带着 at（文件的修改时间）。改它的时候顺手把版本号带上：
+    // 盘上要是被人改过，宿主拒写并说清下一步，而不是拿内存里的旧对象把人的改动盖掉。
+    const q = (st, extra) => {
+      const out = { sessionId: st.sid, cwd: st.cwd, ...extra }
+      if (extra && extra.id !== undefined && out.expectedUpdatedAt === undefined) {
+        const cards = (st.board && st.board.cards) || []
+        const card = cards.find((c) => c.id === Number(extra.id))
+        if (card && card.at) out.expectedUpdatedAt = card.at
+      }
+      return out
+    }
 
     // 剧本列表基本不变（只有上游改仓库才变），取一次缓存住；展开某套时才把它那几步一并带回来
     const loadPlays = async (st, fresh) => {
@@ -594,7 +604,7 @@ window.__ModuleLoader__.load({
       const cards = (b.cards || []).filter((c) => c.kind !== 'map')
       const frontier = new Set(b.frontier || [])
       const open = cards.filter((c) => c.state !== 'done' && c.state !== 'dropped')
-      const conflicts = b.conflicts || { pairs: [], unscoped: [] }
+      const conflicts = b.conflicts || { pairs: [], unscoped: [], rings: [] }
       // 「可开工」单独成组：前置没做完的不混进来，否则一眼看不出现在能碰哪张
       // 可开工：没被挡、没人认领、还没开工。已经在做的就是「在做」组，不重复列
       const ready = open.filter((c) => !(c.blocked || []).length && !c.owner && c.state !== 'doing')
@@ -698,6 +708,12 @@ window.__ModuleLoader__.load({
             ])
             : null)),
         ]) : null,
+
+        // 依赖成环：环里的卡谁都开不了工，比并行冲突更硬
+        (conflicts.rings || []).length
+          ? h('div', { key: 'cy', style: { border: '1px solid #f7768e', borderRadius: 6, padding: '6px 8px', marginBottom: 10, color: '#f7768e', fontSize: 12, lineHeight: 1.55 } },
+            '⚠ 依赖成环：' + conflicts.rings.map((r) => r.map((id) => '#' + id).join(' → ')).join('；') + '。挑一环里的一张，把「等谁 / 父卡」改成环外的卡。')
+          : null,
 
         // 并行冲突：同一块路径被两张在做的卡同时改
         conflicts.pairs.length

@@ -3,12 +3,12 @@
 // 地图上的「已经定了」永远是空的——所以这里每一条都对着一个症状。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
-  answerOf, appendToSection, claimCard, finishCard, loadBoard, mapSections, reopenCard, saveCard,
+  answerOf, appendToSection, claimCard, finishCard, loadBoard, mapPointerLine, mapSections, reopenCard, saveCard,
 } from '../src/board.js'
 
 const tmp = () => mkdtemp(join(tmpdir(), 'pstack-loop-'))
@@ -123,4 +123,69 @@ test('appendToSection：段不存在就补，存在就接在末尾，不碰别�
   assert.match(added, /## 不做什么\n- 乙/, '原有段不能被吃掉')
   assert.equal(answerOf({ body: 'no head' }), '')
   assert.equal(answerOf({ body: '## 结论\n做了 A\n\n## 别的\n不管' }), '做了 A')
+})
+
+test('人手改过的一行，下一次自动写不会把它抹掉', async () => {
+  const dir = await tmp()
+  try {
+    const card = await saveCard(dir, { kind: 'task', title: '给导出加断点' })
+    const path = join(dir, '.pstack', 'board', card.file)
+    // 模拟人在编辑器里往卡里加了一行
+    const raw = await readFile(path, 'utf8')
+    await writeFile(path, `${raw.replace(/\s+$/, '')}\n我在编辑器里加的一行\n`, 'utf8')
+
+    const claimed = await claimCard(dir, card.id, { owner: 'me' })
+    assert.equal(claimed.state, 'doing')
+    assert.match(claimed.body, /认领：me/)
+    assert.match(claimed.body, /我在编辑器里加的一行/, '盘上那份才是一等公民，内存里的旧对象不是')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('改卡时给了旧版本号：一个字都不写，报 conflict', async () => {
+  const dir = await tmp()
+  try {
+    const card = await saveCard(dir, { kind: 'task', title: '别覆盖我' })
+    const path = join(dir, '.pstack', 'board', card.file)
+    const stale = card.at - 5000
+    const err = await saveCard(dir, { id: card.id, title: '改个标题', expectedUpdatedAt: stale }).then(
+      () => null,
+      (e) => e,
+    )
+    assert.equal(err?.kind, 'conflict')
+    assert.match(await readFile(path, 'utf8'), /title: 别覆盖我/, '字节不变')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('重开之后又结一次：地图上不会多一条重复指针', async () => {
+  const dir = await tmp()
+  try {
+    const map = await saveCard(dir, { kind: 'map', title: '这条路' })
+    const card = await saveCard(dir, { kind: 'task', title: '小步改', parent: map.id })
+    await claimCard(dir, card.id)
+    await finishCard(dir, card.id, { note: '第一次成了' })
+    await reopenCard(dir, card.id, { note: '还要再补一刀' })
+    await claimCard(dir, card.id)
+    await finishCard(dir, card.id, { note: '第二次也成了' })
+
+    const board = await loadBoard(dir)
+    const decisions = mapSections(board.cards.find((c) => c.id === map.id)).decisions
+    const hits = decisions.split('\n').filter((l) => l.includes(`](${card.file})`))
+    assert.equal(hits.length, 1, '同一个链接只该有一条：地图是索引，不是流水账')
+    assert.match(hits[0], /第一次成了/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('地图指针：点得开，摘要超 120 字截断', () => {
+  const line = mapPointerLine({ id: 7, title: '长结论', file: '7-x.md', gist: '甲'.repeat(200) })
+  assert.match(line, /\[→\]\(7-x\.md\)/)
+  const gist = line.split(' —— ')[1].split(' [→]')[0]
+  assert.equal([...gist].length, 121, '120 字 + 省略号')
+  assert.ok(gist.endsWith('…'))
+  assert.match(mapPointerLine({ id: 8, title: '短', file: '8-y.md', gist: '成了' }), /#8 短 —— 成了 \[→\]/)
 })

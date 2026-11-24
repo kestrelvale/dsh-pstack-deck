@@ -35,6 +35,9 @@ import { zhOf } from './i18n.js'
 export const name = 'dsh-pstack-deck/tools'
 export const inject = ['tools']
 
+/** 版本号：给了才管，没给就不管。0 是合法 mtime，不能当成「没给」。 */
+const versionOf = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+
 const TIMEOUT = 20000
 
 const text = {
@@ -188,6 +191,7 @@ async function boardTool(args, exec, ctx) {
       // 绑剧本：这张卡按哪套剧本的第几步走（拓扑里「下一步」就先看这一步点名了什么技能）
       playbook: args?.playbook !== undefined ? String(args.playbook) : undefined,
       step: args?.step !== undefined ? Number(args.step) : undefined,
+      expectedUpdatedAt: Number.isFinite(Number(args?.expectedUpdatedAt)) ? Number(args.expectedUpdatedAt) : undefined,
     })
     return `已记入看板：#${card.id} ${card.title}（${kindZh(card.kind)} · ${stateZh(card.state)}）\n${dir}`
   }
@@ -216,7 +220,9 @@ async function boardTool(args, exec, ctx) {
       throw new Error(`结束要走 op=${want === 'done' ? 'done' : 'drop'} 并给一句 note——没有结论的「结束」等于没做`)
     }
     if (!STATES.includes(want)) throw new Error('move 要 state=todo 或 doing（结束用 done / drop）')
-    const card = await addProgress(dir, id, String(args?.note ?? ''), want)
+    const card = await addProgress(dir, id, String(args?.note ?? ''), want, {
+      expectedUpdatedAt: versionOf(args?.expectedUpdatedAt),
+    })
     return `#${card.id} ${card.title} → ${stateZh(card.state)}`
   }
   if (op === 'claim') {
@@ -235,7 +241,7 @@ async function boardTool(args, exec, ctx) {
   if (op === 'release') {
     const id = Number(args?.id)
     if (!Number.isInteger(id) || id <= 0) throw new Error('要给卡号 id')
-    const card = await saveCard(dir, { id, owner: '' })
+    const card = await saveCard(dir, { id, owner: '', expectedUpdatedAt: versionOf(args?.expectedUpdatedAt) })
     return `#${card.id} ${card.title} 已交回待领（没人做）。`
   }
   if (op !== 'list' && op !== 'next') throw new Error('op 只能是 list / add / move / claim / release / done / drop / reopen / next')
@@ -261,7 +267,11 @@ async function boardTool(args, exec, ctx) {
   if (ready.length) lines.push('可开工（前置齐、没人认领）：', ...ready.map(row), '')
   if (busy.length) lines.push('在做：', ...busy.map(row), '')
   if (waiting.length) lines.push('被挡着：', ...waiting.map(row), '')
-  const { pairs, unscoped } = conflictsOf(board.cards)
+  const { pairs, unscoped, rings } = conflictsOf(board.cards)
+  if (rings.length) {
+    lines.push('', '⚠ 依赖成环：' + rings.map((r) => r.map((id) => '#' + id).join(' → ')).join('；') + '。')
+    lines.push('  环里的卡永远开不了工：挑一环里的某张，把它的「等谁 / 父卡」改成环外的卡，或者直接拆开。')
+  }
   if (pairs.length) {
     lines.push('', '⚠ 并行冲突：')
     for (const p of pairs) lines.push(`  #${p.a} 与 #${p.b} 都要动 ${p.paths.join('、')} —— 先串行，别同时改`)
@@ -400,6 +410,10 @@ export function apply(ctx) {
         playbook: { type: 'string', description: 'add 时给：这张卡按哪套剧本走（bug-fix / feature / refactoring …，用 pstack_playbook 看全部）' },
         step: { type: 'number', description: 'add 时给：这套剧本的第几步' },
         owner: { type: 'string', description: '认领人；claim 不给就用当前会话号' },
+        expectedUpdatedAt: {
+          type: 'number',
+          description: '改已有卡时给：你读到这张卡时的 updatedAt（毫秒）。盘上已经变了就一个字都不写，报 conflict',
+        },
         dir: { type: 'string', description: '项目绝对路径；不给就用当前会话的工作目录' },
       },
       required: ['op'],
