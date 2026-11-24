@@ -10,6 +10,8 @@ export const ERROR_KIND = [
   'parse', // 盘上那份读不懂
   'unsupported', // 这件事这个形态做不了
   'permission', // 沙箱不让写
+  'auth', // 要凭据：git 要用户名/令牌
+  'network', // 网不通、DNS、超时
   'env', // 环境缺东西
   'unknown',
 ]

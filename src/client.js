@@ -29,7 +29,12 @@ window.__ModuleLoader__.load({
       if (!conn || !conn.rpc) throw new Error('connection 服务不在')
       const res = await conn.rpc.call(CARRIER_CHANNEL, CARRIER_ENDPOINT, { method, payload })
       if (res && res.ok) return res.value
-      throw new Error((res && res.error && (res.error.message || res.error.code)) || '宿主没有响应')
+      const why = (res && res.error) || {}
+      const e = new Error(why.message || why.code || '宿主没有响应')
+      e.kind = why.kind
+      e.hint = why.hint || ''
+      e.code = why.code
+      throw e
     }
 
     // 每个会话一份 store。右栏并排开两个会话时，两边各读各的板、各记各的草稿，
@@ -59,7 +64,14 @@ window.__ModuleLoader__.load({
         finNote: '',
         sugOpen: '', // 展开了哪条建议（看 Jev 分数和命令）
         node: null, // 流程图里下钻的卡号
-        view: 'board', // board | play | skills | env —— 默认看板：进来先看到「这个项目要干什么」，而不是 58 个技能名
+        work: null, // 在办表：谁在做哪张卡（跨会话）
+        git: null, // 版本页：改动 + 票
+        gitErr: null, // {kind,message,hint}
+        gitLoading: false,
+        commitMsg: '',
+        commitBusy: false,
+        filter: 'all', // 看板过滤器：all | open | doing | done —— 默认全看，收窄是用户主动
+        view: 'board', // board | play | skills | env | git —— 默认看板：进来先看到「这个项目要干什么」，而不是 58 个技能名
         sid: '', // 会话号：看板要用它换出这个会话的项目目录
         cwd: '', // 这个会话的工作目录：面板自己先给，宿主就不必再猜
         board: null,
@@ -429,6 +441,22 @@ window.__ModuleLoader__.load({
       } catch (e) {
         set({ sug: null })
       }
+      // 在办表是副产物：读不到就不显示，不挡看板
+      try {
+        set({ work: await rpc('workpath', q(st)) })
+      } catch (e) {
+        set({ work: null })
+      }
+    }
+
+    // 版本页。票随 changes 一起来（绑在当前的改动上），点提交/推送必须原样带回。
+    const loadGit = async (st, fresh) => {
+      st.set({ gitLoading: true })
+      try {
+        st.set({ git: await rpc('changes', q(st, fresh ? { fresh: true } : {})), gitErr: null, gitLoading: false })
+      } catch (e) {
+        st.set({ git: null, gitErr: { kind: e.kind || 'unknown', message: e.message, hint: e.hint || '' }, gitLoading: false })
+      }
     }
 
     const LAYER_ZH = { project: '按这个项目推', global: '项目里还没卡，看看别的项目', seed: '先起个头' }
@@ -601,7 +629,16 @@ window.__ModuleLoader__.load({
       }
       if (!b) return h('div', { style: { ...s.body, ...s.faint } }, '读看板…')
 
-      const cards = (b.cards || []).filter((c) => c.kind !== 'map')
+      const all = (b.cards || []).filter((c) => c.kind !== 'map')
+      // 过滤器只筛「列表里出现哪些」，KPI 用全量：先把盘子有多大说清楚，再让人收窄
+      const f = store.filter || 'open'
+      const cards = f === 'all'
+        ? all
+        : f === 'doing'
+          ? all.filter((c) => c.state === 'doing')
+          : f === 'done'
+            ? all.filter((c) => c.state === 'done' || c.state === 'dropped')
+            : all.filter((c) => c.state !== 'done' && c.state !== 'dropped')
       const frontier = new Set(b.frontier || [])
       const open = cards.filter((c) => c.state !== 'done' && c.state !== 'dropped')
       const conflicts = b.conflicts || { pairs: [], unscoped: [], rings: [] }
@@ -719,6 +756,32 @@ window.__ModuleLoader__.load({
         conflicts.pairs.length
           ? h('div', { key: 'cf', style: { border: '1px solid #f0b132', borderRadius: 6, padding: '6px 8px', marginBottom: 10, color: '#f0b132', fontSize: 12, lineHeight: 1.55 } },
             '⚠ 并行冲突：' + conflicts.pairs.map((p) => `#${p.a} 与 #${p.b} 都要动 ${p.paths.join('、')}`).join('；') + '。先串行，别同时改。')
+          : null,
+
+        // 一眼看盘子：几张没开、几张在做、几张结掉。数字从全量算，跟着过滤器缩水会骗人
+        h('div', { key: 'kpi', style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 8 } }, [
+          ...[['open', open.length, '待办'], ['doing', all.filter((c) => c.state === 'doing').length, '在做'], ['done', all.filter((c) => c.state === 'done').length, '已结']]
+            .filter(([, n]) => n > 0 || true)
+            .map(([k, n, label]) => h('button', {
+              key: k,
+              style: { ...s.chip(f === k), padding: '1px 8px', fontSize: 10.5 },
+              onClick: () => set({ filter: k }),
+            }, `${label} ${n}`)),
+          h('button', { key: 'all', style: { ...s.chip(f === 'all'), padding: '1px 8px', fontSize: 10.5 }, onClick: () => set({ filter: 'all' }) }, `全部 ${all.length}`),
+          h('span', { key: 'f', style: { ...s.faint, fontSize: 10, marginLeft: 'auto' } },
+            b.stamp ? (b.stamp.freshness === 'fresh' ? '刚读的盘' : b.stamp.freshness === 'failed' ? '读失败，给的是旧底' : `缓存 ${Math.round(b.stamp.ageMs / 1000)} 秒`) : ''),
+        ]),
+
+        // 在办表：谁在做哪张卡。跨会话可见——别人的会话在做什么，这里看得见
+        store.work && (store.work.entries || []).length
+          ? h('div', { key: 'wk', style: { border: '1px solid ' + C.line, borderRadius: 6, padding: '6px 8px', marginBottom: 10 } }, [
+            h('div', { key: 'h', style: { ...s.faint, fontSize: 10, marginBottom: 3 } },
+              `在办 ${store.work.entries.length} 条${store.work.missing ? '（账本还没建）' : ''}`),
+            ...store.work.entries.slice(0, 6).map((e) => h('div', { key: e.sessionId + e.cardId, style: { fontSize: 11, color: C.dim, lineHeight: 1.6, wordBreak: 'break-word' } },
+              `${String(e.sessionId).slice(0, 8)} · #${e.cardId} ${e.title || '（没标题）'} · ${STATE_LABEL[e.state] || e.state} · ${e.stale ? '旧' : Math.round(e.age / 60000) + ' 分钟前'}`)),
+            store.work.entries.length > 6
+              ? h('div', { key: 'more', style: { ...s.faint, fontSize: 10 } }, `还有 ${store.work.entries.length - 6} 条`) : null,
+          ])
           : null,
 
         store.flow ? h(Flow, { key: 'flow', st: store }) : null,
@@ -1116,6 +1179,40 @@ window.__ModuleLoader__.load({
 
     // 环境自检：竞品 INIT FLOW 的第 6 步。每一项都写着「怎么补」，
     // 因为它回答的是「我怎么才能恢复正常」，不是一个红叉清单。
+    const CHAIN_ZH = { done: '过了', current: '现在', fail: '卡住', pending: '等前面' }
+    const CHAIN_C = { done: C.faint, current: '#7aa2f7', fail: '#f85149', pending: '#6b7089' }
+
+    /** 环境页的动作一落地就必须重查：动作的成败只有下一次自检说了算。 */
+    const doEnvAction = async (st, a) => {
+      const set = st.set
+      try {
+        if (a.type === 'refresh') return loadEnv(st, true)
+        if (a.type === 'rpc') {
+          await rpc(a.method, q(st))
+          loadEnv(st, true)
+          return
+        }
+        if (a.type === 'inject-prompt') return inject(st, a.prompt || '')
+        if (a.type === 'open-url') {
+          try {
+            if (typeof window !== 'undefined' && window.open) {
+              window.open(a.url, '_blank', 'noopener')
+              return set({ toast: '已交给浏览器打开', toastAt: Date.now() })
+            }
+          } catch {
+            /* 掉到复制 */
+          }
+          if (navigator.clipboard) {
+            navigator.clipboard.writeText(a.url)
+          }
+          return set({ toast: '打不开浏览器，链接已复制：' + a.url, toastAt: Date.now() })
+        }
+        set({ toast: '这一步还没做成按钮：照着「怎么补」手动做一次', toastAt: Date.now() })
+      } catch (e) {
+        set({ toast: String((e && e.message) || e), toastAt: Date.now() })
+      }
+    }
+
     const ENV_MARK = { ok: '✓', warn: '!', fail: '✕', skip: '·' }
     const ENV_C = { ok: '#3fb950', warn: '#f0b132', fail: '#f85149', skip: C.faint }
     const ENV_ZH = { ok: '正常', warn: '要补', fail: '坏了', skip: '没查' }
@@ -1143,13 +1240,118 @@ window.__ModuleLoader__.load({
           h('div', { key: 'h', style: { display: 'flex', alignItems: 'baseline', gap: 6 } }, [
             h('span', { key: 'm', style: { color: ENV_C[r.state], flex: 'none', fontWeight: 700 } }, ENV_MARK[r.state] || '·'),
             h('span', { key: 'l', style: { fontWeight: 550, flex: 'none' } }, r.label),
+            r.chain
+              ? h('span', { key: 'ch', style: { color: CHAIN_C[r.chain] || C.faint, fontSize: 10, flex: 'none' } }, CHAIN_ZH[r.chain] || '')
+              : null,
             h('span', { key: 'z', style: { ...s.faint, fontSize: 10, flex: 'none' } }, ENV_ZH[r.state] || ''),
             h('span', { key: 'd', style: { color: C.dim, fontSize: 11, flex: 1, minWidth: 0, wordBreak: 'break-word' } }, r.detail),
           ]),
           r.hint ? h('div', { key: 'p', style: { ...s.faint, fontSize: 10.5, marginTop: 3, lineHeight: 1.5 } }, '怎么补：' + r.hint) : null,
+          // 修法就在这一行上：六项是链，链头没修之前后面的按钮亮着也没用，所以按 chain 禁用
+          (r.actions || []).length
+            ? h('div', { key: 'a', style: { display: 'flex', gap: 6, marginTop: 5, flexWrap: 'wrap' } },
+              r.actions.map((a) => h('button', {
+                key: a.type + (a.label || ''),
+                style: { ...s.btn(), padding: '2px 8px', fontSize: 11, opacity: r.chain === 'pending' ? 0.5 : 1 },
+                disabled: r.chain === 'pending',
+                title: r.chain === 'pending' ? `先修前面的 #${r.blockedBy ?? '?'}` : '',
+                onClick: () => doEnvAction(st, a),
+              }, a.label || a.type)))
+            : null,
         ])),
         h('div', { key: 'n', style: { ...s.faint, fontSize: 10, marginTop: 4, lineHeight: 1.6 } },
           '这几项都是现读磁盘，没有缓存要走。点「重新检测」就是重查一遍；改完文件不用重启宿主，刷新这一页就够。'),
+      ])
+    }
+
+    // 版本页：改动、提交、推送。三件事共用一条纪律——先看现场，拿到票，再动手；
+    // 票绑在「你看到的那份改动」上，现场一变就作废。没有票的提交/推送在宿主那边直接拒。
+    const GIT_MARK = { M: '改', A: '新', D: '删', R: '名', C: '拷', '??': '未跟踪', U: '冲', T: '型' }
+    const KIND_ZH = { conflict: '现场变了', env: '环境不对', auth: '要凭据', network: '网不通', unsupported: '这一步做不了', permission: '没权限', parse: '读不出来', not_found: '找不到', unknown: '失败' }
+
+    const Version = ({ st }) => {
+      const set = st.set
+      const err = st.gitErr
+      const g = st.git
+      const act = async (method, payload, okText) => {
+        set({ commitBusy: true })
+        try {
+          const r = await rpc(method, q(st, payload))
+          set({ commitBusy: false, toast: okText(r), toastAt: Date.now(), commitMsg: method === 'commit' ? '' : st.commitMsg })
+          await loadGit(st, true)
+        } catch (e) {
+          set({ commitBusy: false, gitErr: { kind: e.kind || 'unknown', message: e.message, hint: e.hint || '' }, toastAt: Date.now() })
+        }
+      }
+      const doCommit = (files) => act('commit', {
+        message: st.commitMsg,
+        paths: (files || []).map((f) => f.path),
+        ticket: g && g.ticket ? g.ticket.commit : null,
+      }, (r) => `已提交 ${r.hash}：${r.summary}`)
+      const doPush = () => act('sync', { ticket: g ? g.push : null }, (r) => (r.pushed ? '已推送' : '远端已是最新，没有要推的'))
+
+      if (err) {
+        return h('div', { style: s.body }, [
+          h('div', { key: 'e', style: { border: '1px solid #f85149', borderRadius: 6, padding: '8px 10px', color: '#f85149', fontSize: 12, lineHeight: 1.6 } }, [
+            h('div', { key: 'k', style: { fontWeight: 650 } }, '✕ ' + (KIND_ZH[err.kind] || err.kind || '失败')),
+            h('div', { key: 'm', style: { color: C.dim, marginTop: 3 } }, err.message),
+            err.hint ? h('div', { key: 'h', style: { ...s.faint, fontSize: 10.5, marginTop: 3 } }, '下一步：' + err.hint) : null,
+          ]),
+          h('button', { key: 'r', style: { ...s.btn(), marginTop: 8 }, onClick: () => loadGit(st, true) }, '重读版本信息'),
+        ])
+      }
+      if (!g) return h('div', { style: { ...s.body, ...s.faint } }, st.gitLoading ? '读版本…' : '还没读版本')
+
+      const files = g.files || []
+      return h('div', { style: s.body }, [
+        h('div', { key: 'h', style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' } }, [
+          h('span', { key: 'b', style: { fontFamily: C.mono, fontWeight: 600 } }, g.branch || 'HEAD'),
+          h('span', { key: 'c', style: { ...s.faint, fontSize: 11, flex: 1, minWidth: 0 } },
+            g.clean ? '没有未提交的改动' : `${files.length} 个文件改过`),
+          h('button', { key: 'r', style: { ...s.btn(), padding: '2px 8px', fontSize: 11, flex: 'none' }, disabled: !!st.gitLoading, onClick: () => loadGit(st, true) }, st.gitLoading ? '读…' : '刷新改动'),
+        ]),
+
+        files.length
+          ? h('div', { key: 'fl', style: { border: '1px solid ' + C.line, borderRadius: 6, marginBottom: 10, overflow: 'hidden' } },
+            files.slice(0, 40).map((f) => h('div', { key: f.path, style: { display: 'flex', gap: 8, padding: '3px 8px', fontSize: 11.5, borderBottom: '1px solid ' + C.line } }, [
+              h('span', { key: 's', style: { ...s.faint, fontFamily: C.mono, width: 14, flex: 'none' } }, GIT_MARK[f.status] || f.status),
+              h('span', { key: 'p', style: { fontFamily: C.mono, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: f.path }, f.path),
+              f.staged ? h('span', { key: 'g', style: { ...s.faint, fontSize: 10, flex: 'none' } }, '已暂存') : null,
+            ])))
+          : null,
+
+        // 提交：有改动才让写。票不用人管——它跟着上面这份改动一起来，改了现场这张票自己就废
+        files.length
+          ? h('div', { key: 'cm', style: { marginBottom: 10 } }, [
+            h('textarea', {
+              key: 'msg',
+              value: st.commitMsg || '',
+              placeholder: '这次提交了什么？一句话说清（会当成 commit message）',
+              onChange: (e) => set({ commitMsg: e.target.value }),
+              style: { ...s.input, width: '100%', minHeight: 44, resize: 'vertical', boxSizing: 'border-box' },
+            }),
+            h('div', { key: 'b', style: { display: 'flex', gap: 6, marginTop: 6 } }, [
+              h('button', {
+                key: 'go',
+                style: { ...s.btn(true), padding: '3px 10px', fontSize: 11.5 },
+                disabled: !!st.commitBusy || !String(st.commitMsg || '').trim(),
+                onClick: () => doCommit(files),
+              }, st.commitBusy ? '提交中…' : '提交'),
+              h('span', { key: 'w', style: { ...s.faint, fontSize: 10, alignSelf: 'center' } }, '提交范围就是上面这份改动；中途文件又变了会被拒，刷新一下再来'),
+            ]),
+          ])
+          : null,
+
+        // 推送：票绑的是「提交之后的那份现场」，所以提交完要刷新再推
+        h('div', { key: 'ps', style: { display: 'flex', gap: 6, alignItems: 'center' } }, [
+          h('button', {
+            key: 'p',
+            style: { ...s.btn(), padding: '3px 10px', fontSize: 11.5 },
+            disabled: !!st.commitBusy || !g.push,
+            onClick: doPush,
+          }, '推送'),
+          h('span', { key: 'w', style: { ...s.faint, fontSize: 10 } }, g.push ? '永不 force；远端拒绝会原样报回来' : '没有可推的分支'),
+        ]),
       ])
     }
 
@@ -1209,6 +1411,7 @@ window.__ModuleLoader__.load({
         }, '剧本'),
         h('button', { key: 'vs', style: { ...s.chip(store.view === 'skills'), fontSize: 11 }, onClick: () => set({ view: 'skills' }) }, '全部技能'),
         h('button', { key: 've', style: { ...s.chip(store.view === 'env'), fontSize: 11 }, onClick: () => { set({ view: 'env' }); loadEnv(store, false) } }, '环境'),
+        h('button', { key: 'vg', style: { ...s.chip(store.view === 'git'), fontSize: 11 }, onClick: () => { set({ view: 'git' }); loadGit(store, false) } }, '版本'),
         store.upd && !store.upd.error
           ? h('span', {
             key: 'pv',
@@ -1241,6 +1444,13 @@ window.__ModuleLoader__.load({
         ])
       }
 
+      if (store.view === 'git') {
+        return h('div', { style: s.wrap }, [
+          head,
+          h(Version, { key: 'git', st: store }),
+          toastFresh ? h('div', { key: 'toast', style: { flex: 'none', margin: '0 10px 10px', padding: '6px 8px', borderRadius: 6, background: 'rgba(122,162,247,.14)', color: C.accent, fontSize: 11.5 } }, store.toast) : null,
+        ])
+      }
       if (store.view === 'env') {
         return h('div', { style: s.wrap }, [
           head,

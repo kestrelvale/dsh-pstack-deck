@@ -1,6 +1,6 @@
 {
   "name": "dsh-pstack-deck",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "type": "module",
   "description": "pstack 的 DSH 面板：58 个技能点一下就用，带项目看板、依赖拓扑与三层决策推荐。",
   "license": "MIT",

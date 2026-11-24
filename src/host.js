@@ -39,6 +39,11 @@ import { candidatesOf, suggest } from './suggest.js'
 import { listPlaybooks, playbookByName } from './playbook.js'
 import { checkUpdate } from './update.js'
 import { zhOf } from './i18n.js'
+import { createSnapshots } from './snapshot.js'
+import { SNAPSHOT_TTL_MS, WORK_WINDOW_MS, WORK_ARCHIVE_MS } from './constants.js'
+import { noteReport, readWorkPath } from './workpath.js'
+import { changes as gitChanges, commit as gitCommit, sync as gitSync, classifyFailure } from './git.js'
+import { makeTicket, fingerprintOf, verifyTicket } from './ticket.js'
 
 export const name = 'dsh-pstack-deck'
 export const inject = ['skills', 'connection']
@@ -147,16 +152,86 @@ const methods = {
 
   async board(payload, ctx) {
     const ws = resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)
-    const board = await loadBoard(ws.root)
-    return { ok: true, value: await view(board, ws) }
+    return { ok: true, value: await boardView(ws, { fresh: payload?.fresh === true }) }
+  },
+
+  /** 在办表：谁在做哪张卡。读失败与「确实没有」分开报——前者带 error，后者 missing。 */
+  async workpath(payload, ctx) {
+    const ws = resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)
+    const r = await snaps.get(`work:${ws.root}`, () => readWorkPath(ws.root, { windowMs: WORK_WINDOW_MS, archiveMs: WORK_ARCHIVE_MS }), { force: payload?.fresh === true })
+    return { ok: true, value: { ...r.value, stamp: stampOf(r) } }
+  },
+
+  /**
+   * 版本页：看改动 + 两张票。票不是装饰：点提交/推送时必须原样带回，
+   * 现场变了就一个字都不写——「你看到的」和「现在是的」必须是同一份。
+   */
+  async changes(payload, ctx) {
+    const ws = resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)
+    try {
+      const r = await snaps.get(`git:${ws.root}`, () => gitChanges(ws.root), { force: payload?.fresh === true })
+      const fp = fpOfFiles(r.value.files ?? [])
+      return {
+        ok: true,
+        value: {
+          ...r.value,
+          ticket: { commit: makeTicket({ op: 'commit', target: 'board', fingerprint: fp }) },
+          push: makeTicket({ op: 'push', target: 'board', fingerprint: fp }),
+          stamp: stampOf(r),
+        },
+      }
+    } catch (e) {
+      return { ok: false, error: { code: 'changes', ...errorOf(e) } }
+    }
+  },
+
+  async commit(payload, ctx) {
+    const ws = resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)
+    const message = String(payload?.message ?? '').trim()
+    if (!message) return { ok: false, error: { code: 'no-message', kind: 'unsupported', message: '写一句这次提交了什么', hint: '' } }
+    // 没票 = 没先看一眼现场：和「票过期」同一种性质，归 conflict 让人刷新
+    if (!payload?.ticket || typeof payload.ticket !== 'object') {
+      return { ok: false, error: { code: 'ticket', kind: 'conflict', message: '提交要先看一遍改动、拿到票再点', hint: '在版本页刷新一次 changes，再点提交' } }
+    }
+    let now
+    try {
+      now = await gitChanges(ws.root) // 验票必须读现场，不能读缓存
+      verifyTicket(payload?.ticket, { fingerprint: fpOfFiles(now.files ?? []) })
+    } catch (e) {
+      return { ok: false, error: { code: 'ticket', ...errorOf(e) } }
+    }
+    const res = await gitCommit(ws.root, { message, paths: Array.isArray(payload?.paths) ? payload.paths : undefined })
+    if (!res.ok) return gitFail('commit', res)
+    snaps.clear()
+    return { ok: true, value: { ...res, branch: now.branch } }
+  },
+
+  async sync(payload, ctx) {
+    const ws = resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)
+    if (!payload?.ticket || typeof payload.ticket !== 'object') {
+      return { ok: false, error: { code: 'ticket', kind: 'conflict', message: '推送要先看一遍改动、拿到票再点', hint: '在版本页刷新一次 changes，再点推送' } }
+    }
+    const now = await gitChanges(ws.root)
+    if (now.branch === 'HEAD') {
+      return { ok: false, error: { code: 'push', kind: 'conflict', message: 'HEAD 不在任何分支上（detached），没有可推的分支', hint: '先 git switch 回一个分支' } }
+    }
+    try {
+      verifyTicket(payload?.ticket, { fingerprint: fpOfFiles(now.files ?? []) })
+    } catch (e) {
+      return { ok: false, error: { code: 'ticket', ...errorOf(e) } }
+    }
+    const res = await gitSync(ws.root, { push: true, ticket: payload?.ticket })
+    if (!res?.ok) return gitFail('push', res)
+    snaps.clear()
+    return { ok: true, value: { ...res, branch: now.branch } }
   },
 
   /** 初始化：把一个陌生项目变成「有板可看」。重复点是安全的。 */
   async init(payload, ctx) {
     const ws = resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)
     const out = await initProject(ws.root, { title: payload?.title })
-    const board = await loadBoard(ws.root)
-    return { ok: true, value: { ...(await view(board, ws)), created: out.created, skipped: out.skipped } }
+    snaps.clear() // 刚建出来的板不能命中初始化之前的空结果
+    return { ok: true, value: { ...(await boardView(ws, { fresh: true })), created: out.created, skipped: out.skipped } }
   },
 
   async boardSave(payload, ctx) {
@@ -165,7 +240,7 @@ const methods = {
     const title = String(payload?.title ?? '').trim()
     // 认领/交回/写 scope 都不改标题，所以只有新建卡才强制要一句标题
     if (!id && !title) return { ok: false, error: { code: 'no-title', message: '写一句这张卡要干什么' } }
-    await saveCard(cwd, {
+    const saved = await saveCard(cwd, {
       id,
       kind: payload?.kind,
       state: payload?.state,
@@ -178,7 +253,10 @@ const methods = {
       after: Array.isArray(payload?.after) ? payload.after : undefined,
       expectedUpdatedAt: Number.isFinite(Number(payload?.expectedUpdatedAt)) ? Number(payload.expectedUpdatedAt) : undefined,
     })
-    return { ok: true, value: await view(await loadBoard(cwd), resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)) }
+    const ws = resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)
+    await reportCard(ws, payload?.sessionId, saved)
+    snaps.clear()
+    return { ok: true, value: await boardView(ws, { fresh: true }) }
   },
 
   /** 三层决策：项目层 → 全局层 → 开场建议，永远给 3~5 条带提示词的动作。 */
@@ -197,12 +275,20 @@ const methods = {
       return { ok: false, error: { code: 'need-answer', message: '结束要走「完成 / 废弃」，并且写一句结论' } }
     }
     if (!note && !state) return { ok: false, error: { code: 'no-change', message: '要么改状态，要么写一句进展' } }
+    // 面板拖卡也要带版本号：拖的时候看的是旧板，盘上被人改过就别盖
+    let moved
+    const v = Number.isFinite(Number(payload?.expectedUpdatedAt)) && payload?.expectedUpdatedAt !== undefined && payload?.expectedUpdatedAt !== null
+      ? Number(payload.expectedUpdatedAt)
+      : undefined
     try {
-      await addProgress(cwd, id, note || `→ ${stateZh(state)}`, state)
+      moved = await addProgress(cwd, id, note || `→ ${stateZh(state)}`, state, { expectedUpdatedAt: v })
     } catch (e) {
       return { ok: false, error: { code: 'no-card', kind: e?.kind ?? 'unknown', message: String(e?.message ?? e), hint: String(e?.hint ?? '') } }
     }
-    return { ok: true, value: await view(await loadBoard(cwd), resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)) }
+    const ws = resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)
+    await reportCard(ws, payload?.sessionId, moved)
+    snaps.clear()
+    return { ok: true, value: await boardView(ws, { fresh: true }) }
   },
 
   /**
@@ -231,10 +317,12 @@ const methods = {
     } catch (e) {
       return { ok: false, error: { code: 'rejected', kind: e?.kind ?? 'unknown', message: String(e?.message ?? e), hint: String(e?.hint ?? '') } }
     }
-    const nextBoard = await loadBoard(cwd)
+    const ws = resolveWorkspace(ctx, payload?.sessionId, payload?.cwd)
+    await reportCard(ws, payload?.sessionId, touched)
+    snaps.clear()
     return {
       ok: true,
-      value: { ...(await view(nextBoard, resolveWorkspace(ctx, payload?.sessionId, payload?.cwd))), touched: { id: touched.id, state: touched.state } },
+      value: { ...(await boardView(ws, { fresh: true })), touched: { id: touched.id, state: touched.state } },
     }
   },
 }
@@ -277,6 +365,55 @@ async function view(board, ws) {
     conflicts: conflictsOf(board.cards),
     map: map ? { id: map.id, title: map.title, sections: mapSections(map), children: childrenOf(board.cards, map.id).length } : null,
   }
+}
+
+// 面板的到期判断在宿主这一侧：给出去的每一份板都盖一个时间戳，面板只负责显示
+// 「几秒前的」，不再自己猜哪份是新的。
+const snaps = createSnapshots()
+
+function boardKey(ws) {
+  return `board:${ws.root}|${ws.cwd}`
+}
+
+function stampOf(r) {
+  return {
+    at: r.at,
+    ageMs: r.ageMs,
+    ttlMs: SNAPSHOT_TTL_MS,
+    freshness: r.freshness,
+    source: r.source,
+    error: r.error ? { kind: r.error.kind, message: r.error.message, hint: r.error.hint } : undefined,
+  }
+}
+
+/** 卡变了就记一笔，跨会话的在办表靠它。账本坏了不该让改板失败。 */
+async function reportCard(ws, sessionId, card) {
+  if (!card?.id) return
+  try {
+    await noteReport({ root: ws.root, sessionId: String(sessionId ?? 'unknown'), cardId: card.id, title: card.title, state: card.state })
+  } catch {
+    /* 记账是副产物，写板才是正事 */
+  }
+}
+
+/**
+ * 现场指纹：git 自己的 status 列表（原样，顺序也照 git 给的）。
+ * 票绑的就是它；提交完 worktree 变了，旧的推送票自动作废——这正是要的：
+ * 点推送的人必须看过提交之后的现场。
+ */
+function fpOfFiles(files) {
+  return fingerprintOf(files)
+}
+
+function gitFail(stage, res) {
+  const c = classifyFailure(stage, res)
+  return { ok: false, error: { code: stage, kind: c.kind, message: c.message, hint: c.hint } }
+}
+
+/** 一份带时间戳的板：5 秒内复用，刷新失败给旧值但标 failed。 */
+async function boardView(ws, { fresh = false } = {}) {
+  const r = await snaps.get(boardKey(ws), async () => view(await loadBoard(ws.root), ws), { force: fresh })
+  return { ...r.value, stamp: stampOf(r) }
 }
 
 export function apply(ctx) {

@@ -356,3 +356,171 @@ test('更新检查：路由走通，查不到时给的是错误不是「最新�
   // 真联网的那一次结果不确定，但形状必须稳：要么有 latest，要么有 error
   assert.ok(body.result.value.latest || body.result.value.error)
 })
+
+test('宿主半：看板带时间戳；第二次读复用；写后作废；fresh 才真重读', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const proj = await mkdtemp(join(tmpdir(), 'pstack-stamp-'))
+  try {
+    const { ctx, out } = fakeCtx({ cwd: proj, sid: 's1' })
+    host.apply(ctx)
+    const route = out.routes[0]
+    const rpc = async (rpcId, method, payload) =>
+      (await post(route, { type: 'client-request', rpcId, payload: { method, payload } })).json()
+
+    const a = await rpc('t1', 'board', { sessionId: 's1' })
+    const st = a.result.value.stamp
+    assert.equal(st.freshness, 'fresh')
+    assert.equal(st.source, 'load')
+    assert.equal(st.ttlMs, 5000)
+    assert.ok(st.at > 0, '面板要拿这个时间戳说「几秒前的」')
+
+    const b = await rpc('t2', 'board', { sessionId: 's1' })
+    assert.equal(b.result.value.stamp.source, 'cache', '5 秒内不该再扫一遍盘')
+    assert.equal(b.result.value.stamp.at, st.at, '复用就得是同一份快照')
+
+    const c = await rpc('t3', 'board', { sessionId: 's1', fresh: true })
+    assert.equal(c.result.value.stamp.source, 'load', '点了刷新必须真重读')
+
+    await rpc('t4', 'boardSave', { sessionId: 's1', title: '新建的一张' })
+    const d = await rpc('t5', 'board', { sessionId: 's1' })
+    assert.equal(d.result.value.cards.length, 1, '写过之后不能还看见旧的空板')
+    // 写路径自己会重算一份板并把它缓存起来，所以这里命中 cache 是对的；
+    // 该钉的是「见过一次新的就永远不该再退回旧的」
+    assert.ok(['cache', 'load'].includes(d.result.value.stamp.source))
+    assert.ok(d.result.value.stamp.at >= st.at)
+  } finally {
+    await rm(proj, { recursive: true, force: true })
+  }
+})
+
+test('宿主半：卡一变就进在办表，同一会话同一张卡只留最新，跨会话互相看得见', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const proj = await mkdtemp(join(tmpdir(), 'pstack-work-'))
+  const ledger = await mkdtemp(join(tmpdir(), 'pstack-ledger-'))
+  const prev = process.env.PSP_WORK_PATH_DIR
+  process.env.PSP_WORK_PATH_DIR = ledger
+  try {
+    const { ctx, out } = fakeCtx({ cwd: proj, sid: 's1' })
+    host.apply(ctx)
+    const route = out.routes[0]
+    const rpc = async (rpcId, method, payload) =>
+      (await post(route, { type: 'client-request', rpcId, payload: { method, payload } })).json()
+
+    await rpc('w1', 'boardSave', { sessionId: 's1', title: '把登录页修完' })
+    const first = await rpc('w2', 'workpath', { sessionId: 's1' })
+    assert.equal(first.result.value.missing, false, '写过就该有账本')
+    assert.equal(first.result.value.entries.length, 1)
+    assert.equal(String(first.result.value.entries[0].cardId), '1')
+    assert.equal(first.result.value.fresh, 1, '新鲜度是计数：24 小时内的条目')
+    assert.equal(first.result.value.entries[0].sessionId, 's1')
+
+    // 第二个会话（同一个项目）：换一个 ctx，模拟另一个面板在动同一张卡
+    const second = fakeCtx({ cwd: proj, sid: 's2' })
+    host.apply(second.ctx)
+    const route2 = second.out.routes[0]
+    const rpc2 = async (rpcId, method, payload) =>
+      (await post(route2, { type: 'client-request', rpcId, payload: { method, payload } })).json()
+    await rpc2('w3', 'boardAct', { sessionId: 's2', id: 1, action: 'claim', owner: 'bob' })
+    // 再回到第一个会话看：同项目两个会话各一条，谁都不盖谁
+    const again = await rpc('w4', 'workpath', { sessionId: 's1' })
+    assert.equal(again.result.value.entries.length, 2, '两个会话各一条，谁都不盖谁')
+    assert.deepEqual(again.result.value.entries.map((e) => e.state).sort(), ['doing', 'idea'].sort())
+    assert.match(again.result.value.stamp.freshness, /^(fresh|stale)$/)
+  } finally {
+    if (prev === undefined) delete process.env.PSP_WORK_PATH_DIR
+    else process.env.PSP_WORK_PATH_DIR = prev
+    await rm(proj, { recursive: true, force: true })
+    await rm(ledger, { recursive: true, force: true })
+  }
+})
+
+test('宿主半：在办表「确实没有」报 missing，不报错', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const proj = await mkdtemp(join(tmpdir(), 'pstack-empty-'))
+  const ledger = await mkdtemp(join(tmpdir(), 'pstack-emptyledger-'))
+  const prev = process.env.PSP_WORK_PATH_DIR
+  process.env.PSP_WORK_PATH_DIR = ledger
+  try {
+    const { ctx, out } = fakeCtx({ cwd: proj, sid: 's1' })
+    host.apply(ctx)
+    const r = await (await post(out.routes[0], { type: 'client-request', rpcId: 'e1', payload: { method: 'workpath', payload: { sessionId: 's1' } } })).json()
+    assert.equal(r.result.ok, true)
+    assert.equal(r.result.value.missing, true)
+    assert.deepEqual(r.result.value.entries, [])
+  } finally {
+    if (prev === undefined) delete process.env.PSP_WORK_PATH_DIR
+    else process.env.PSP_WORK_PATH_DIR = prev
+    await rm(proj, { recursive: true, force: true })
+    await rm(ledger, { recursive: true, force: true })
+  }
+})
+
+test('宿主半：版本页看得见改动、凭票提交、现场变了票就作废、无票不推', async () => {
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { execFileSync } = await import('node:child_process')
+  const repo = await mkdtemp(join(tmpdir(), 'pstack-git-'))
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8' })
+  try {
+    git('init', '-q')
+    git('config', 'user.email', 't@example.com')
+    git('config', 'user.name', 'T')
+    await writeFile(join(repo, 'a.md'), 'one\n')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'init')
+
+    const { ctx, out } = fakeCtx({ cwd: repo, sid: 's1' })
+    host.apply(ctx)
+    const route = out.routes[0]
+    const rpc = async (rpcId, method, payload) =>
+      (await post(route, { type: 'client-request', rpcId, payload: { method, payload } })).json()
+
+    const clean = await rpc('g1', 'changes', { sessionId: 's1' })
+    assert.equal(clean.result.ok, true)
+    assert.equal(clean.result.value.clean, true)
+    assert.ok(clean.result.value.ticket?.commit?.token, '干净的时候也要有票')
+
+    await writeFile(join(repo, 'a.md'), 'one\ntwo\n')
+    const dirty = await rpc('g2', 'changes', { sessionId: 's1', fresh: true })
+    assert.equal(dirty.result.value.clean, false)
+    assert.equal(dirty.result.value.files.length, 1)
+
+    const bad = await rpc('g3', 'commit', { sessionId: 's1', message: 'x', ticket: clean.result.value.ticket.commit })
+    assert.equal(bad.result.ok, false, '拿旧的票提交要被拒')
+    assert.equal(bad.result.error.kind, 'conflict')
+
+    const ok = await rpc('g4', 'commit', { sessionId: 's1', message: '加一行', ticket: dirty.result.value.ticket.commit })
+    assert.equal(ok.result.ok, true)
+    assert.match(ok.result.value.hash, /^[0-9a-f]{7,}$/)
+    assert.equal(ok.result.value.summary, '加一行')
+
+    const noTicket = await rpc('g5', 'sync', { sessionId: 's1', ticket: null })
+    assert.equal(noTicket.result.ok, false, '无票不推')
+    assert.equal(noTicket.result.error.kind, 'conflict')
+
+    const noMsg = await rpc('g6', 'commit', { sessionId: 's1', message: '  ', ticket: dirty.result.value.ticket.commit })
+    assert.equal(noMsg.result.ok, false)
+    assert.equal(noMsg.result.error.code, 'no-message')
+  } finally {
+    await rm(repo, { recursive: true, force: true })
+  }
+})
+
+test('宿主半：不是 git 仓库时版本页报 env，并说清怎么补', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const dir = await mkdtemp(join(tmpdir(), 'pstack-nogit-'))
+  try {
+    const { ctx, out } = fakeCtx({ cwd: dir, sid: 's1' })
+    host.apply(ctx)
+    const r = await (await post(out.routes[0], { type: 'client-request', rpcId: 'n1', payload: { method: 'changes', payload: { sessionId: 's1' } } })).json()
+    assert.equal(r.result.ok, false)
+    assert.equal(r.result.error.kind, 'env')
+    assert.ok(String(r.result.error.hint || '').length > 0, '失败必须带下一步')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

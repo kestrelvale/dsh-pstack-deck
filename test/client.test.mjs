@@ -698,3 +698,107 @@ test('环境视图：逐项自检，坏的那项说清怎么补，「重新检�
   assert.equal(replays[1].payload.fresh, true, '手点的那次要强制绕过缓存')
   assert.match(textOf(Pane({ sessionId: 's30' })), /v0\.6\.0，已是最新/, '重跑的结果要覆盖上一次')
 })
+
+test('看板：在办条把别的会话正在做的卡列出来（读不到就不显示）', async () => {
+  const board = {
+    ok: true,
+    value: {
+      cwd: '/proj', dir: '/proj/.pstack/board', next: null, frontier: [],
+      cards: [{ id: 2, kind: 'task', state: 'todo', title: '把 X 修好', body: '', progress: 0, after: [], at: 1, blocked: [] }],
+      graph: { nodes: [], edges: [], lines: [], depthMax: 0 },
+      conflicts: { pairs: [], unscoped: [] }, map: null,
+      stamp: { at: Date.now(), ageMs: 0, ttlMs: 5000, freshness: 'fresh', source: 'cache' },
+    },
+  }
+  const rpc = (method) => {
+    if (method === 'board') return board
+    if (method === 'suggest') return { ok: true, value: { layer: 'project', items: [], scanned: 1 } }
+    if (method === 'workpath') return { ok: true, value: { entries: [{ sessionId: 'sess-abcdef99', cardId: '2', title: '把 X 修好', state: 'doing', at: Date.now() - 60000 }], total: 1 } }
+    return catalogOk
+  }
+  const { got } = boot(rpc)
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  Pane({ sessionId: 's33' })
+  await tick()
+  const text = textOf(Pane({ sessionId: 's33' }))
+  assert.match(text, /在办 1 条/, '在办条要显示条数')
+  assert.match(text, /sess-abc/, '要显示是哪个会话')
+  assert.match(text, /#2 把 X 修好/, '要显示卡号与标题')
+})
+
+test('环境：链上的动作按钮真去调宿主，不是只写一句提示', async () => {
+  const calls = []
+  const env = {
+    ok: true,
+    value: {
+      at: Date.now(), health: 'warn',
+      summary: { ok: 1, warn: 1, fail: 0, skip: 0 },
+      project: { name: 'p' },
+      chain: { head: 'board', tone: 'warn' },
+      rows: [{
+        key: 'board', label: '当前项目', state: 'warn', detail: '没有看板', hint: '在面板点初始化',
+        chain: 'current', blockedBy: null,
+        actions: [{ type: 'rpc', method: 'init', label: '现在初始化' }],
+      }],
+    },
+  }
+  const rpc = (method, payload) => {
+    calls.push([method, payload])
+    if (method === 'env') return env
+    if (method === 'init') return { ok: true, value: { root: '/proj', created: ['board'] } }
+    return catalogOk
+  }
+  const { got } = boot(rpc)
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  clickByText(Pane({ sessionId: 's34' }), '环境')
+  await tick()
+  const before = calls.filter(([m]) => m === 'env').length
+  assert.equal(clickByText(Pane({ sessionId: 's34' }), '现在初始化'), true, '动作按钮要画出来')
+  await tick(60)
+  assert.equal(calls.filter(([m]) => m === 'init').length, 1, '点了就要真调 init')
+  assert.ok(calls.filter(([m]) => m === 'env').length > before, '做完动作要重新自检')
+})
+
+test('版本：改动列出来，提交带走 changes 发的票，前端不自己编票', async () => {
+  const calls = []
+  const changes = {
+    ok: true,
+    value: {
+      branch: 'main', clean: false,
+      files: [{ path: 'src/a.md', status: 'M', staged: true }],
+      ticket: { commit: { token: 'tc' }, push: { token: 'tp' } },
+    },
+  }
+  const rpc = (method, payload) => {
+    calls.push([method, payload])
+    if (method === 'changes') return changes
+    if (method === 'commit') return { ok: true, value: { hash: 'abc1234', summary: '改了 a.md' } }
+    return catalogOk
+  }
+  const { got } = boot(rpc)
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  clickByText(Pane({ sessionId: 's35' }), '版本')
+  await tick()
+  assert.match(textOf(Pane({ sessionId: 's35' })), /main/, '要显示分支')
+  assert.match(textOf(Pane({ sessionId: 's35' })), /src\/a\.md/, '要列出改动文件')
+
+  const findByType = (node, t) => {
+    if (!node || typeof node !== 'object') return null
+    if (Array.isArray(node)) { for (const n of node) { const f = findByType(n, t); if (f) return f } return null }
+    if (typeof node.type === 'function') return findByType(node.type(node.props), t)
+    if (node.type === t) return node
+    const kids = node.children || []
+    for (const n of kids) { const f = findByType(n, t); if (f) return f }
+    return null
+  }
+  const ta = findByType(Pane({ sessionId: 's35' }), 'textarea')
+  assert.ok(ta, '要有写提交说明的地方')
+  ta.props.onChange({ target: { value: '改了 a.md' } })
+
+  assert.equal(clickByText(Pane({ sessionId: 's35' }), '提交'), true, '要有提交按钮')
+  await tick(60)
+  const hit = calls.find(([m]) => m === 'commit')
+  assert.ok(hit, '提交要真的走宿主')
+  assert.equal(hit[1].ticket.token, 'tc', '票必须原样带回，前端不自己编')
+  assert.deepEqual(hit[1].paths, ['src/a.md'], '只提交面上这些改动')
+})

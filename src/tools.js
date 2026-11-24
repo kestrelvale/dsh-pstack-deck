@@ -169,6 +169,20 @@ function boardDir(args, exec, ctx) {
 }
 
 /**
+ * 卡一变就记账。账本坏了只警告，不挡改板——记账是给人看的副产物，不是写路径的一部分。
+ */
+async function reportCard(exec, ctx, dir, card) {
+  if (!card?.id) return
+  const header = exec?.agent?.session?.header
+  const sessionId = String(header?.id ?? exec?.sessionId ?? 'tool')
+  try {
+    await noteReport({ root: dir, sessionId, cardId: card.id, title: card.title, state: card.state })
+  } catch {
+    /* 在办账本读不出来不该让这次改板白做 */
+  }
+}
+
+/**
  * 看板。agent 得知道自己在哪个项目里，所以 dir 优先：不给就退回这个会话的工作目录。
  */
 async function boardTool(args, exec, ctx) {
@@ -193,12 +207,14 @@ async function boardTool(args, exec, ctx) {
       step: args?.step !== undefined ? Number(args.step) : undefined,
       expectedUpdatedAt: Number.isFinite(Number(args?.expectedUpdatedAt)) ? Number(args.expectedUpdatedAt) : undefined,
     })
+    await reportCard(exec, ctx, dir, card)
     return `已记入看板：#${card.id} ${card.title}（${kindZh(card.kind)} · ${stateZh(card.state)}）\n${dir}`
   }
   if (op === 'done' || op === 'drop') {
     const id = Number(args?.id)
     if (!Number.isInteger(id) || id <= 0) throw new Error('要给卡号 id')
     const card = await finishCard(dir, id, { state: op === 'done' ? 'done' : 'dropped', note: String(args?.note ?? '') })
+    await reportCard(exec, ctx, dir, card)
     const map = mapOf((await loadBoard(dir)).cards)
     return [
       `#${card.id} ${card.title} → ${stateZh(card.state)}`,
@@ -210,6 +226,7 @@ async function boardTool(args, exec, ctx) {
     const id = Number(args?.id)
     if (!Number.isInteger(id) || id <= 0) throw new Error('要给卡号 id')
     const card = await reopenCard(dir, id, { note: String(args?.note ?? '') })
+    await reportCard(exec, ctx, dir, card)
     return `#${card.id} ${card.title} 已重开（${stateZh(card.state)}），可以再认领。`
   }
   if (op === 'move') {
@@ -223,6 +240,7 @@ async function boardTool(args, exec, ctx) {
     const card = await addProgress(dir, id, String(args?.note ?? ''), want, {
       expectedUpdatedAt: versionOf(args?.expectedUpdatedAt),
     })
+    await reportCard(exec, ctx, dir, card)
     return `#${card.id} ${card.title} → ${stateZh(card.state)}`
   }
   if (op === 'claim') {
@@ -231,6 +249,7 @@ async function boardTool(args, exec, ctx) {
     const owner = String(args?.owner ?? exec?.sessionId ?? 'me').trim()
     const scope = Array.isArray(args?.scope) ? args.scope : []
     const card = await claimCard(dir, id, { owner, scope })
+    await reportCard(exec, ctx, dir, card)
     const doing = (await loadBoard(dir)).cards.filter((c) => c.owner && c.owner === owner && c.state === 'doing' && c.id !== card.id)
     return [
       `#${card.id} ${card.title} 归你了（${owner} → 在做）。`,
@@ -242,6 +261,7 @@ async function boardTool(args, exec, ctx) {
     const id = Number(args?.id)
     if (!Number.isInteger(id) || id <= 0) throw new Error('要给卡号 id')
     const card = await saveCard(dir, { id, owner: '', expectedUpdatedAt: versionOf(args?.expectedUpdatedAt) })
+    await reportCard(exec, ctx, dir, card)
     return `#${card.id} ${card.title} 已交回待领（没人做）。`
   }
   if (op !== 'list' && op !== 'next') throw new Error('op 只能是 list / add / move / claim / release / done / drop / reopen / next')

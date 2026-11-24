@@ -55,3 +55,35 @@ test('环境自检：有新版就说有新版，新版号要出现在说明里',
   assert.match(ver.detail, /9\.9\.9/)
   assert.match(ver.hint, /重启/)
 })
+test('环境链：链头只有一个，非 ok 的行都带能点的修法，后面的排队等着', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pstack-envchain-'))
+  try {
+    const out = await checkEnv({ cwd: dir, updater: offline })
+    const board = out.rows.find((r) => r.key === 'board')
+    assert.equal(board.state, 'warn', '空目录里板没起')
+    assert.equal(board.chain, 'current', '第一处能动手的就是链头')
+    assert.equal(out.chain.head, 'board')
+    assert.equal(out.chain.tone, 'current')
+    assert.equal(board.actions[0].type, 'rpc', '「现在初始化」要能点')
+    assert.equal(board.actions[0].method, 'init')
+
+    // 链头之前的都算 done（skip 也不算病），之后的一律 pending 且指回链头
+    const order = out.rows.map((r) => r.key)
+    const at = order.indexOf('board')
+    for (const r of out.rows.slice(0, at)) assert.equal(r.chain, 'done', r.key + ' 应该在链头之前')
+    for (const r of out.rows.slice(at + 1)) {
+      assert.equal(r.chain, 'pending', r.key + ' 应该在排队')
+      assert.equal(r.blockedBy, 'board')
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('环境链：每一项不 ok 都配了动作，ok 的行不配按钮', async () => {
+  const out = await checkEnv({ cwd: process.cwd(), updater: offline })
+  for (const r of out.rows) {
+    if (r.state === 'ok') assert.deepEqual(r.actions, [], r.key + ' 正常时不该有按钮')
+    for (const a of r.actions) assert.ok(['refresh', 'rpc', 'inject-prompt', 'open-url', 'wizard'].includes(a.type))
+  }
+})
