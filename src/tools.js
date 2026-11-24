@@ -28,6 +28,7 @@ import { projectRoot } from './anchor.js'
 import { buildCatalog, repoRoot, zhRoot, RANK } from './catalog.js'
 import { detectInit, initProject } from './init.js'
 import { suggest } from './suggest.js'
+import { listPlaybooks, playbookByName } from './playbook.js'
 import { resolveWorkspace, workspaceOf } from './host.js'
 import { zhOf } from './i18n.js'
 
@@ -184,6 +185,9 @@ async function boardTool(args, exec, ctx) {
       parent: args?.parent ? Number(args.parent) : undefined,
       scope: Array.isArray(args?.scope) ? args.scope : undefined,
       owner: args?.owner !== undefined ? String(args.owner) : undefined,
+      // 绑剧本：这张卡按哪套剧本的第几步走（拓扑里「下一步」就先看这一步点名了什么技能）
+      playbook: args?.playbook !== undefined ? String(args.playbook) : undefined,
+      step: args?.step !== undefined ? Number(args.step) : undefined,
     })
     return `已记入看板：#${card.id} ${card.title}（${kindZh(card.kind)} · ${stateZh(card.state)}）\n${dir}`
   }
@@ -315,6 +319,41 @@ export function apply(ctx) {
   })
 
   tools.register({
+    name: 'pstack_playbook',
+    description:
+      'pstack 的技能之间没有硬顺序——顺序在剧本里（22 套：bug-fix / feature / refactoring / investigation …）。'
+      + '不给 name 就列全部剧本；给 name 就摊开它的编号步骤，以及每一步点名要用哪些技能。',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: '剧本名，例如 bug-fix；不给就列全部' },
+      },
+      additionalProperties: false,
+    },
+    timeoutMs: TIMEOUT,
+    output: text,
+    execute: async (args) => {
+      const known = new Set((await catalog()).skills.map((s) => s.name))
+      const name = String(args?.name ?? '').trim()
+      if (!name) {
+        const all = await listPlaybooks(known)
+        const rows = all.filter((p) => p.steps.length)
+        return [
+          `pstack 剧本 ${rows.length} 套（技能之间的先后就在这里面）：`,
+          ...rows.map((p) => `- ${p.slug} — ${p.title}（${p.steps.length} 步）第一步：/${p.firstSkill}`),
+          '要看某套的步骤：pstack_playbook name=bug-fix',
+        ].join('\n')
+      }
+      const play = await playbookByName(name, known)
+      if (!play) throw new Error(`没有这套剧本：${name}（先 pstack_playbook 看全部）`)
+      return [
+        `《${play.title || play.slug}》${play.steps.length} 步：`,
+        ...play.steps.map((st) => `${st.n}. ${st.text}${st.skills.length ? `\n   → ${st.skills.map((x) => '/' + x).join(' ')}` : ''}`),
+      ].join('\n')
+    },
+  })
+
+  tools.register({
     name: 'pstack_install',
     description:
       '把 pstack 技能装进某个项目的项目级技能目录（<项目>/.dsh/skills），让那个项目新开的会话也能用。'
@@ -358,6 +397,8 @@ export function apply(ctx) {
         after: { type: 'array', items: { type: 'number' }, description: 'add 时给：要等哪几张卡先做完（卡号）' },
         parent: { type: 'number', description: 'add 时给：挂在哪张卡下面（通常是地图的卡号）' },
         scope: { type: 'array', items: { type: 'string' }, description: 'add 时给：这张卡能动哪些路径，用来判断并行会不会打架' },
+        playbook: { type: 'string', description: 'add 时给：这张卡按哪套剧本走（bug-fix / feature / refactoring …，用 pstack_playbook 看全部）' },
+        step: { type: 'number', description: 'add 时给：这套剧本的第几步' },
         owner: { type: 'string', description: '认领人；claim 不给就用当前会话号' },
         dir: { type: 'string', description: '项目绝对路径；不给就用当前会话的工作目录' },
       },

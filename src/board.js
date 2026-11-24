@@ -47,6 +47,8 @@ function stringify(card) {
   if (card.owner) fm.push(`owner: ${card.owner}`)
   if (card.scope?.length) fm.push(`scope: ${card.scope.join(', ')}`)
   if (card.verify) fm.push(`verify: ${card.verify}`)
+  if (card.playbook) fm.push(`playbook: ${card.playbook}`)
+  if (card.step) fm.push(`step: ${card.step}`)
   fm.push('---', '')
   return fm.join('\n') + String(card.body ?? '').replace(/\s+$/, '') + '\n'
 }
@@ -73,6 +75,8 @@ function toCard(file, text) {
     owner: String(data.owner ?? '').trim() || undefined,
     scope: String(data.scope ?? '').split(',').map((x) => x.trim()).filter(Boolean),
     verify: String(data.verify ?? '').trim() || undefined,
+    playbook: String(data.playbook ?? '').trim() || undefined,
+    step: Number(data.step) > 0 ? Number(data.step) : undefined,
     body,
     progress: progressLines(body).length,
   }
@@ -120,6 +124,8 @@ export async function saveCard(cwd, input) {
     owner: input.owner !== undefined ? (String(input.owner).trim() || undefined) : existing?.owner,
     scope: input.scope !== undefined ? input.scope.map((x) => String(x).trim()).filter(Boolean) : (existing?.scope ?? []),
     verify: input.verify !== undefined ? (String(input.verify).trim() || undefined) : existing?.verify,
+    playbook: input.playbook !== undefined ? (String(input.playbook).trim() || undefined) : existing?.playbook,
+    step: input.step !== undefined ? (Number(input.step) > 0 ? Number(input.step) : undefined) : existing?.step,
     body: input.body ?? existing?.body ?? '',
   }
   // 标题变了就把文件名跟着改，看板目录在文件管理器里才好认

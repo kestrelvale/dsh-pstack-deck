@@ -32,8 +32,10 @@ import {
 } from './board.js'
 import { projectName, projectRoot, relFrom } from './anchor.js'
 import { buildCatalog, toProviderItem, repoRoot, zhRoot, PROVIDER, PKG_ROOT } from './catalog.js'
+import { checkEnv } from './env.js'
 import { detectInit, initProject } from './init.js'
-import { suggest } from './suggest.js'
+import { candidatesOf, suggest } from './suggest.js'
+import { listPlaybooks, playbookByName } from './playbook.js'
 import { checkUpdate } from './update.js'
 import { zhOf } from './i18n.js'
 
@@ -53,6 +55,10 @@ async function catalog({ fresh = false } = {}) {
   const value = await buildCatalog({ root: repoRoot(), installedRoot })
   cache = { at: now, value }
   return value
+}
+
+async function knownSkillNames() {
+  return new Set((await catalog()).skills.map((s) => s.name))
 }
 
 async function skillBody(skillName) {
@@ -92,6 +98,23 @@ const methods = {
     const pkg = JSON.parse(await readFile(join(PKG_ROOT, 'package.json'), 'utf8'))
     const r = await checkUpdate({ current: pkg.version, useCache: payload?.fresh !== true })
     return { ok: true, value: r }
+  },
+  /** 环境自检：面板「环境」页一条一条画，点刷新就整块重跑。 */
+  async env(payload, ctx) {
+    const cwd = workspaceOf(ctx, payload?.sessionId, payload?.cwd)
+    return { ok: true, value: await checkEnv({ cwd, fresh: payload?.fresh === true }) }
+  },
+
+  async playbooks() {
+    const plays = await listPlaybooks(await knownSkillNames())
+    return {
+      ok: true,
+      value: {
+        // 面板只列「有步骤」的剧本：没有编号步骤的（babysit / opening-a-pr）就是一段纪律，不是流程
+        plays: plays.map((p) => ({ slug: p.slug, title: p.title, steps: p.steps.length, skills: p.skills, firstSkill: p.firstSkill })),
+        detail: Object.fromEntries(plays.map((p) => [p.slug, p.steps])),
+      },
+    }
   },
   async catalog(payload) {
     const cat = await catalog({ fresh: payload?.fresh === true })
@@ -213,13 +236,25 @@ const methods = {
 /** 面板要的形状：卡 + 每张卡的下一步建议 + 全局下一步 + 这是哪个项目、初始化到哪一步。 */
 async function view(board, ws) {
   // blocked 与 next 一起下发：面板不用自己重算依赖，看到的和宿主推的是同一份判断
-  const cards = board.cards.map((c) => ({
-    ...c,
-    next: recommend(c, board.cards),
-    answer: answerOf(c),
-    blocked: blockersOf(c, board.cards),
-    children: childrenOf(board.cards, c.id).length,
-  }))
+  // 卡上绑了剧本的，把剧本读出来：下一步技能按剧本第 N 步走，而不是每步重新判
+  const plays = new Map()
+  for (const c of board.cards) {
+    if (!c.playbook || plays.has(c.playbook)) continue
+    plays.set(c.playbook, await playbookByName(c.playbook, await knownSkillNames()))
+  }
+  const cards = board.cards.map((c) => {
+    const play = c.playbook ? plays.get(c.playbook) : null
+    return {
+      ...c,
+      next: recommend(c, board.cards),
+      answer: answerOf(c),
+      blocked: blockersOf(c, board.cards),
+      children: childrenOf(board.cards, c.id).length,
+      candidates: candidatesOf(c, board.cards, { play }),
+      playSteps: play ? play.steps.length : 0,
+      playTitle: play ? play.title || play.slug : '',
+    }
+  })
   const next = nextOf(cards)
   const map = mapOf(board.cards)
   const where = ws ?? { cwd: board.cwd, root: board.cwd, name: projectName(board.cwd), rel: '' }

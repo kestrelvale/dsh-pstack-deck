@@ -113,7 +113,15 @@ test('宿主半：/api/psp 走 POST 信封，catalog 与 skill 都能取', async
 test('工具半：pstack_list 有清单，pstack_use 给正文，坏名字报错', async () => {
   const { ctx, out } = fakeCtx()
   tools.apply(ctx)
-  assert.deepEqual(out.tools.map((t) => t.name).sort(), ['pstack_board', 'pstack_init', 'pstack_install', 'pstack_list', 'pstack_suggest', 'pstack_use'])
+  assert.deepEqual(out.tools.map((t) => t.name).sort(), ['pstack_board', 'pstack_init', 'pstack_install', 'pstack_list', 'pstack_playbook', 'pstack_suggest', 'pstack_use'])
+
+  const play = out.tools.find((t) => t.name === 'pstack_playbook')
+  const all = await play.execute({}, {})
+  assert.match(all, /bug-fix/, '不给名字就列全部剧本')
+  const one = await play.execute({ name: 'bug-fix' }, {})
+  assert.match(one, /《Bug fix》6 步/)
+  assert.match(one, /→ \/why/, '每一步要写出该用的技能')
+  await assert.rejects(() => play.execute({ name: '没有这套' }, {}), /没有这套剧本/)
 
   const list = out.tools.find((t) => t.name === 'pstack_list')
   const text = await list.execute({}, {})

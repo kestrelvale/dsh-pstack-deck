@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { addProgress, saveCard } from '../src/board.js'
-import { suggest } from '../src/suggest.js'
+import { candidatesOf, MAX_CANDIDATES, suggest } from '../src/suggest.js'
 
 const tmp = () => mkdtemp(join(tmpdir(), 'pstack-sug-'))
 const shapeOk = (out) => {
@@ -167,4 +167,50 @@ test('图：节点带深度、边指向后继、废弃的卡不进线里', async
   assert.deepEqual(g.lines.map((l) => l[0]).sort(), [1, 4, 5], '没有未完成前置的才是线的头')
   assert.equal(g.lines.some((l) => l.includes(3)), false, '废弃的卡不该出现在推进的线里')
   assert.equal(g.depthMax, 1)
+})
+
+test('一张卡给 1~5 条走法：主推第一，其它是同类可行走法，命令都带卡号', () => {
+  const bug = { id: 3, kind: 'bug', state: 'todo', title: '登录后偶发 401，刷新就好', body: '复现 3 次' }
+  const list = candidatesOf(bug, [bug], { project: 'demo' })
+  assert.ok(list.length >= 2 && list.length <= MAX_CANDIDATES, `条数要在 1~5：${list.length}`)
+  assert.equal(list[0].skill, 'tdd', '缺陷的主推是先写测试')
+  assert.ok(list.every((c) => c.prompt.includes('#3')), '每条命令都要带卡号')
+  assert.deepEqual(list.map((c) => c.skill), [...new Set(list.map((c) => c.skill))], '不能重复堆同一个技能')
+  assert.ok(list[0].urgency >= list[1].urgency, '主推的紧急度不该低于备选')
+
+  const idea = { id: 4, kind: 'idea', state: 'idea', title: '把导出改成流式的，别一次读进内存', body: '' }
+  const ideas = candidatesOf(idea, [idea], {})
+  assert.equal(ideas[0].skill, 'figure-it-out')
+  assert.ok(ideas.length <= MAX_CANDIDATES)
+
+  // 说不清的卡只给一条：先让它变具体
+  const vague = { id: 5, kind: 'task', state: 'idea', title: '快一点', body: '' }
+  const ask = candidatesOf(vague, [vague], {})
+  assert.equal(ask.length, 1)
+  assert.equal(ask[0].skill, 'in-your-own-words')
+  assert.equal(ask[0].ask, true)
+})
+
+test('绑了剧本的卡：这一步点名的技能排在主推前面', () => {
+  const play = {
+    slug: 'bug-fix',
+    title: 'Bug fix',
+    steps: [
+      { n: 1, text: 'reproduce', skills: ['why'] },
+      { n: 2, text: 'diagnose', skills: ['why', 'interrogate', 'architect'] },
+    ],
+  }
+  const card = { id: 7, kind: 'bug', state: 'todo', title: '登录后偶发 401，刷新就好', body: 'x', playbook: 'bug-fix', step: 2 }
+  const list = candidatesOf(card, [card], { play })
+  assert.deepEqual(list.slice(0, 2).map((c) => c.skill), ['why', 'interrogate'], '剧本第 2 步的顺序要保留')
+  assert.equal(list[0].source, 'playbook')
+  assert.ok(list.every((c) => c.prompt.includes('#7')))
+})
+
+test('剧本越界或没绑剧本时退回决策模型，不报错', () => {
+  const card = { id: 9, kind: 'task', state: 'todo', title: '给看板加列筛选，别每次都往下翻', playbook: 'bug-fix', step: 99 }
+  const play = { slug: 'bug-fix', title: 'Bug fix', steps: [{ n: 1, text: 'x', skills: ['why'] }] }
+  const list = candidatesOf(card, [card], { play })
+  assert.equal(list[0].source, 'model')
+  assert.equal(list[0].skill, 'architect')
 })

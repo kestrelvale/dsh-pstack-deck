@@ -354,7 +354,15 @@ test('看板：流程图视图画出节点与箭头，废弃的单独标出', as
       dir: '/proj/.pstack/board',
       next: null,
       cards: [
-        { id: 1, kind: 'task', state: 'doing', owner: 'me', title: '先把 session 换掉', body: '', progress: 0, after: [], next: { skill: 'tdd', why: '先写个会失败的测试' } },
+        {
+          id: 1, kind: 'task', state: 'doing', owner: 'me', title: '先把 session 换掉', body: '', progress: 0, after: [],
+          next: { skill: 'tdd', why: '先写个会失败的测试' },
+          // 宿主下发的候选：主推 + 一条其它走法（拓扑要都画出来）
+          candidates: [
+            { skill: 'tdd', why: '先写个会失败的测试', prompt: '/tdd #1 先把 session 换掉' },
+            { skill: 'prove-it-works', why: '真跑一遍', prompt: '/prove-it-works #1 先把 session 换掉' },
+          ],
+        },
         { id: 2, kind: 'task', state: 'todo', title: '再加刷新', body: '', progress: 0, after: [1], blocked: [1], next: null },
         { id: 3, kind: 'idea', state: 'dropped', title: '顺手做移动端', body: '', progress: 0, after: [1], next: null },
       ],
@@ -386,7 +394,8 @@ test('看板：流程图视图画出节点与箭头，废弃的单独标出', as
   assert.match(text, /列表/, '切过去之后按钮该变成返回列表')
 
   // 预期线路：没做完的卡后面跟着虚线小格「推荐的技能」和「完成」
-  assert.match(text, /→ \/tdd/, '流程图要画出下一步推荐什么')
+  assert.match(text, /★ \/tdd/, '流程图要画出决策模型的主推')
+  assert.match(text, /→ \/prove-it-works/, '不止一条走法时，其它走法也要画出来')
   assert.match(text, /✓ 完成 #1/, '预期线路要落到「完成」')
 
   // 点节点 → 下钻：给命令、给完结入口
@@ -579,4 +588,111 @@ test('面板半：宿主从 useSessions 喂会话时也认（tab 的 sessionId �
   assert.equal(calls.length > 0, true, '没有 sessionId 也要去取板')
   assert.equal(calls[calls.length - 1].sessionId, 'live-1')
   assert.equal(calls[calls.length - 1].cwd, '/live/proj')
+})
+
+test('剧本视图：列出剧本，摊开步骤，能把某一步开成一张卡', async () => {
+  const playsReply = {
+    ok: true,
+    value: {
+      plays: [
+        { slug: 'bug-fix', title: 'Bug fix', steps: 6, skills: ['why', 'interrogate', 'architect'], firstSkill: 'why' },
+        { slug: 'babysit', title: 'Babysit', steps: 0, skills: [], firstSkill: '' },
+      ],
+      detail: {
+        'bug-fix': [
+          { n: 1, text: '先复现，别猜。把失败变成一条能重跑的命令。', skills: ['why'] },
+          { n: 2, text: '对着一份真实日志问清楚为什么会这样。', skills: ['why', 'interrogate'] },
+        ],
+      },
+    },
+  }
+  const board = {
+    ok: true,
+    value: {
+      cwd: '/proj', dir: '/proj/.pstack/board', next: null, cards: [], graph: { nodes: [], edges: [], lines: [], depthMax: 0 },
+    },
+  }
+  const calls = []
+  const { got } = boot((method, payload) => {
+    calls.push({ method, payload })
+    if (method === 'playbooks') return playsReply
+    if (method === 'board') return board
+    if (method === 'boardSave') return board
+    if (method === 'suggest') return { ok: false }
+    return catalogOk
+  })
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+  Pane({ sessionId: 's20' })
+  await tick()
+  assert.equal(clickByText(Pane({ sessionId: 's20' }), '剧本'), true, '标题栏要有剧本入口')
+  await tick()
+  const list = textOf(Pane({ sessionId: 's20' }))
+  assert.match(list, /Bug fix/, '列出剧本')
+  assert.match(list, /6 步/)
+  assert.ok(!/Babysit/.test(list), '没有编号步骤的剧本不当流程列出来')
+  assert.match(list, /技能之间没有先后/, '要交代清技能顺序从哪来')
+
+  assert.equal(clickByText(Pane({ sessionId: 's20' }), 'Bug fix'), true)
+  const detail = textOf(Pane({ sessionId: 's20' }))
+  assert.match(detail, /1\./, '摊开的是编号步骤')
+  assert.match(detail, /复现/)
+  assert.match(detail, /\/interrogate/, '每步点名的技能要能点')
+  assert.match(detail, /用这一步开卡/)
+
+  assert.equal(clickByText(Pane({ sessionId: 's20' }), '用这一步开卡'), true)
+  await tick()
+  const save = calls.filter((c) => c.method === 'boardSave').pop()
+  assert.equal(save.payload.playbook, 'bug-fix', '开的卡要记住是哪套剧本')
+  assert.equal(save.payload.step, 1, '以及第几步')
+})
+
+test('环境视图：逐项自检，坏的那项说清怎么补，「重新检测」重跑', async () => {
+  const calls = []
+  let bumped = 0
+  const envReply = (extra) => ({
+    ok: true,
+    value: {
+      at: 1,
+      root: '/tmp/p',
+      cwd: '/tmp/p',
+      project: { name: 'p', initialized: true, cards: 3 },
+      health: 'warn',
+      summary: { ok: 2, warn: 1, fail: 0, skip: 0 },
+      rows: [
+        { key: 'skills', label: '技能库', state: 'ok', detail: '22 个技能', hint: '' },
+        { key: 'zh', label: '中文说明', state: 'ok', detail: '22 / 22 份', hint: '' },
+        { key: 'deps', label: '依赖', state: 'warn', detail: '2 个技能缺依赖', hint: '跑 /install-skills 补齐' },
+        ...extra,
+      ],
+    },
+  })
+  const { got } = boot((method, payload) => {
+    calls.push({ method, payload })
+    if (method === 'env') return envReply(bumped ? [{ key: 'version', label: '插件版本', state: 'ok', detail: 'v0.6.0，已是最新', hint: '' }] : [])
+    return catalogOk
+  })
+  const Pane = got.slots.find((s) => s.name === 'sidebar.right.pane.tab').Comp
+
+  assert.equal(clickByText(Pane({ sessionId: 's30' }), '环境'), true, '标题栏要有环境入口')
+  await tick()
+  assert.equal(calls.filter((c) => c.method === 'env').length, 1, '第一次进这个页就去查')
+  const first = calls.find((c) => c.method === 'env')
+  assert.equal(first.payload.sessionId, 's30', '请求要带上是哪个会话')
+  assert.notEqual(first.payload.fresh, true, '第一次不用强制新鲜')
+
+  const shown = textOf(Pane({ sessionId: 's30' }))
+  assert.match(shown, /1 项要补/, '标题按最坏的那项说话')
+  assert.match(shown, /依赖/)
+  assert.match(shown, /2 个技能缺依赖/)
+  assert.match(shown, /怎么补：跑 \/install-skills 补齐/, '要补的那项得说清怎么补')
+  assert.match(shown, /22 个技能/)
+  assert.match(shown, /现读磁盘/, '交代这一页不是缓存')
+
+  bumped = 1
+  assert.equal(clickByText(Pane({ sessionId: 's30' }), '重新检测'), true)
+  await tick()
+  const replays = calls.filter((c) => c.method === 'env')
+  assert.equal(replays.length, 2)
+  assert.equal(replays[1].payload.fresh, true, '手点的那次要强制绕过缓存')
+  assert.match(textOf(Pane({ sessionId: 's30' })), /v0\.6\.0，已是最新/, '重跑的结果要覆盖上一次')
 })

@@ -22,7 +22,8 @@ import {
   recommend,
   saveCard,
 } from '../src/board.js'
-import { suggest } from '../src/suggest.js'
+import { candidatesOf, suggest } from '../src/suggest.js'
+import { listPlaybooks, playbookByName } from '../src/playbook.js'
 import { buildCatalog, RANK } from '../src/catalog.js'
 import { zhOf, GROUP_ZH } from '../src/i18n.js'
 
@@ -104,12 +105,22 @@ const seed = async () => {
 if (!process.env.PSP_PROJ) await seed()
 const boardView = async () => {
   const b = await loadBoard(proj)
-  const cards = b.cards.map((c) => ({
-    ...c,
-    next: recommend(c, b.cards),
-    blocked: blockersOf(c, b.cards),
-    children: childrenOf(b.cards, c.id).length,
-  }))
+  const playCache = new Map()
+  const cards = []
+  for (const c of b.cards) {
+    let play = null
+    if (c.playbook && !playCache.has(c.playbook)) playCache.set(c.playbook, await playbookByName(c.playbook, new Set(cat.skills.map((x) => x.name))))
+    if (c.playbook) play = playCache.get(c.playbook)
+    cards.push({
+      ...c,
+      next: recommend(c, b.cards),
+      blocked: blockersOf(c, b.cards),
+      children: childrenOf(b.cards, c.id).length,
+      candidates: candidatesOf(c, b.cards, { play }),
+      playSteps: play ? play.steps.length : 0,
+      playTitle: play ? play.title || play.slug : '',
+    })
+  }
   const map = mapOf(b.cards)
   return {
     cwd: proj,
@@ -192,6 +203,16 @@ const ctx = {
               return boardView().then((value) => ({ ok: true, value }))
             }
             if (req && req.method === 'suggest') return suggest({ cwd: proj, roots: [] }).then((value) => ({ ok: true, value }))
+            if (req && req.method === 'playbooks') {
+              return listPlaybooks(new Set(cat.skills.map((x) => x.name))).then((all) => ({
+                ok: true,
+                value: {
+                  plays: all.map((p) => ({ slug: p.slug, title: p.title, steps: p.steps.length, skills: p.skills, firstSkill: p.firstSkill })),
+                  detail: Object.fromEntries(all.map((p) => [p.slug, p.steps])),
+                },
+              }))
+            }
+            if (req && req.method === 'boardSave') return boardView().then((value) => ({ ok: true, value }))
             return Promise.resolve(payload)
           },
         },
@@ -243,6 +264,26 @@ if (openName === 'board' || openName === 'flow' || openName === 'drill' || openN
     await new Promise((r) => setTimeout(r, 200))
   }
 }
+if (openName === 'plays' || openName === 'play') {
+  const walk = (node, label) => {
+    if (!node || typeof node !== 'object') return false
+    if (Array.isArray(node)) return node.some((n) => walk(n, label))
+    if (typeof node.type === 'function') return walk(node.type(node.props), label)
+    const kids = node.children || []
+    const flat = (n) => (Array.isArray(n) ? n.map(flat).join('') : typeof n === 'string' ? n : n && n.children ? flat(n.children) : '')
+    if (node.props && typeof node.props.onClick === 'function' && (kids.includes(label) || flat(kids).includes(label))) {
+      node.props.onClick()
+      return true
+    }
+    return walk(kids, label)
+  }
+  walk(React.createElement(Panel, { sessionId: 'preview' }), '剧本')
+  await new Promise((r) => setTimeout(r, 300))
+  if (openName === 'play') {
+    walk(React.createElement(Panel, { sessionId: 'preview' }), 'Bug fix')
+    await new Promise((r) => setTimeout(r, 200))
+  }
+}
 if (openName === 'list') {
   const tree = React.createElement(Panel, { sessionId: 'preview' })
   const walk = (node, label) => {
@@ -261,7 +302,7 @@ if (openName === 'list') {
   walk(tree, '全部技能')
   await new Promise((r) => setTimeout(r, 300))
 }
-if (openName && !['board', 'flow', 'drill', 'init', 'list', 'finish'].includes(openName)) {
+if (openName && !['board', 'flow', 'drill', 'init', 'list', 'finish', 'plays', 'play'].includes(openName)) {
   const toSkills = (node) => {
     if (!node || typeof node !== 'object') return false
     if (Array.isArray(node)) return node.some(toSkills)

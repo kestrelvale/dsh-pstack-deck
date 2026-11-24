@@ -115,6 +115,93 @@ function choiceOf(card, cards, project) {
   }
 }
 
+// 每张卡能走的几条路：先按决策模型选出主推的那一条，再补上同类可行的其它走法。
+// 只给一条太窄（人可能不想先写测试，想先看清结构），给太多等于没建议——上限 5 条。
+const ALTERNATIVES = {
+  bug: ['tdd', 'correct', 'prove-it-works'],
+  task: ['architect', 'prove-it-works', 'tdd'],
+  idea: ['figure-it-out', 'sharpen', 'architect'],
+  map: [],
+}
+export const MAX_CANDIDATES = 5
+
+const WHY_ALT = {
+  tdd: '先写一个会失败的测试，把「修好了」变成可验证的',
+  correct: '把它变成一条以后不会再犯的规则',
+  'prove-it-works': '真跑一遍，拿真实输出说话',
+  architect: '先画类型与模块边界，再动代码',
+  'figure-it-out': '大改动先设计一条可审的路线',
+  sharpen: '先把要解决的事说具体',
+}
+
+/**
+ * 一张卡的下一步候选——1 到 5 条，第一条是决策模型的主推。
+ * 剧本优先：卡上绑了剧本，第 N 步点名的技能就是这一步该用哪些。
+ */
+export function candidatesOf(card, cards, { project = '', play = null } = {}) {
+  const certainty = noulClear(card)
+  const urgency = scoreUrgency(card)
+  const scope = project ? `${card.title}（项目：${project}）` : card.title
+  const one = (skill, why, i, source) => ({
+    id: `${project || ''}#${card.id}#${skill}`,
+    cardId: card.id,
+    project,
+    title: card.title,
+    kind: card.kind,
+    state: card.state,
+    skill,
+    why,
+    urgency: Math.round((urgency - i * 0.12) * 100) / 100,
+    certainty,
+    factors: noulFactors(card),
+    source,
+    ask: false,
+    prompt: withLoop(`/${skill} #${card.id} ${scope}`, card.id),
+  })
+
+  if (!noulActionable(card)) {
+    return [{
+      id: `${project || ''}#${card.id}#ask`,
+      cardId: card.id,
+      project,
+      title: card.title,
+      kind: card.kind,
+      state: card.state,
+      skill: 'in-your-own-words',
+      why: '这张卡还不够清楚，先把它说具体再动手',
+      urgency,
+      certainty,
+      factors: noulFactors(card),
+      source: 'ask',
+      ask: true,
+      prompt: `/in-your-own-words #${card.id} ${scope}：我想解决的是`,
+    }]
+  }
+
+  const out = []
+  const seen = new Set()
+  const add = (skill, why, source) => {
+    if (!skill || seen.has(skill) || out.length >= MAX_CANDIDATES) return
+    seen.add(skill)
+    out.push(one(skill, why, out.length, source))
+  }
+
+  // ① 剧本这一步点名的技能（顺序就是剧本里的顺序）
+  if (play && Number(card.step) > 0) {
+    const step = (play.steps || []).find((s) => s.n === Number(card.step))
+    for (const skill of (step && step.skills) || []) {
+      add(skill, `剧本《${play.title || play.slug}》第 ${card.step} 步点名`, 'playbook')
+    }
+  }
+  // ② 决策模型的主推
+  const next = recommend(card, cards)
+  if (next) add(next.skill, next.why, 'model')
+  // ③ 同类可行的其它走法
+  for (const skill of ALTERNATIVES[card.kind] || []) add(skill, WHY_ALT[skill] || '', 'alt')
+
+  return out
+}
+
 /**
  * 注入的命令不只是命令，还捎带一句收尾契约。
  * 没有这句，agent 干完活不会回写看板——「执行完状态不动」就是这么来的。
